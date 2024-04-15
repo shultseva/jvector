@@ -92,8 +92,6 @@ public class SimpleTest {
     @Test
     public void BrokenGraph_sameCoordinates() {
         var vectorsValue = new MutableListVectorValues(2);
-        Random r = new Random();
-
 
         var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.EUCLIDEAN);
         var graph = builder.getGraph();

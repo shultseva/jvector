@@ -33,13 +33,4 @@ public class ArraysUtils {
         }
         return false;
     }
-
-
-    public static FixedBitSet toBitSet(int[] input) {
-        var set = new FixedBitSet(input.length);
-        for (var in : input) {
-            set.set(in);
-        }
-        return set;
-    }
 }

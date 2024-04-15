@@ -110,7 +110,7 @@ public class Int2SortedIntArrayHashMap {
         mask = newCapacity - 1;
         resizeThreshold = (int) (newCapacity * loadFactor);
         final int[] tempKeys = new int[capacity];
-        final int[][] tempValues = new int[capacity][0];;
+        final int[][] tempValues = new int[capacity][0];
         initializeValues(tempValues);
         for (int i = 0, size = values.length; i < size; i++) {
             final int[] value = values[i];

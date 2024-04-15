@@ -170,7 +170,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
                 new LabeledOnHeapGraphIndex<>(
                         M, (node, m) -> new ConcurrentNeighborSet(node, m, similarity, alpha));
         int size = getGraph().getView().getIdUpperBound();
-        this.graphSearcher = PoolingSupport.newThreadBased(() -> new LabeledGraphSearcher<T>(getGraph().getView(), new GrowableBitSet(size)));
+        this.graphSearcher = PoolingSupport.newThreadBased(() -> new LabeledGraphSearcher<>(getGraph().getView(), new GrowableBitSet(size)));
 
         // in scratch we store candidates in reverse order: worse candidates are first
         this.naturalScratch = PoolingSupport.newThreadBased(() -> new NodeArray(Math.max(beamWidth, M + 1)));
@@ -187,16 +187,14 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
             size = v.get().size();
         }
 
-        simdExecutor.submit(() -> {
-            range(0, size).parallel().forEach(i -> {
-                try (
-                        var v1 = vectors.get();
-                        var l1 = labels.get()
-                ) {
-                    addGraphNode(i, v1.get(), l1.get());
-                }
-            });
-        }).join();
+        simdExecutor.submit(() -> range(0, size).parallel().forEach(i -> {
+            try (
+                    var v1 = vectors.get();
+                    var l1 = labels.get()
+            ) {
+                addGraphNode(i, v1.get(), l1.get());
+            }
+        })).join();
 
         cleanup();
         return graph;
