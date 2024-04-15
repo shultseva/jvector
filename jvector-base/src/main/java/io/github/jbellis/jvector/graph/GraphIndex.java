@@ -27,6 +27,8 @@ package io.github.jbellis.jvector.graph;
 import io.github.jbellis.jvector.util.Bits;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Represents a graph-based vector index.  Nodes are represented as ints, and edges are
@@ -135,5 +137,13 @@ public interface GraphIndex<T> extends AutoCloseable {
         }
 
         return sb.toString();
+    }
+
+    default Map<Integer, List<Integer>> getGraphRepresentation()  {
+        throw new UnsupportedOperationException("");
+    }
+
+    default int startNode() {
+        throw new UnsupportedOperationException("");
     }
 }

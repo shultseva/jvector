@@ -60,6 +60,32 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
 
     abstract T getTargetVector();
 
+    protected GraphIndexBuilderInterface<T> getBuilder(
+            RandomAccessVectorValues<T> vectors,
+            VectorEncoding vectorEncoding,
+            VectorSimilarityFunction similarityFunction,
+            int M,
+            int beamWidth,
+            float neighborOverflow,
+            float alpha
+    ) {
+        return new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, M, beamWidth, neighborOverflow, alpha);
+    }
+
+    protected OnHeapGraphIndexInterface<T> buildSequentially(GraphIndexBuilderInterface<T> builder, RandomAccessVectorValues<T> vectors) {
+        return TestUtil.buildSequentially(builder, vectors);
+    }
+
+    protected long addGraphNode(GraphIndexBuilderInterface<T> builder, int node, RandomAccessVectorValues<T> vectors) {
+        return builder.addGraphNode(node, vectors);
+    }
+
+    protected SearchResult search(T targetVector, int topK, RandomAccessVectorValues<T> vectors, VectorEncoding vectorEncoding, VectorSimilarityFunction similarityFunction, GraphIndex<T> graph, Bits acceptOrds) {
+        return GraphSearcher.search(targetVector, topK, vectors, vectorEncoding, similarityFunction, graph, acceptOrds);
+    }
+
+
+
     // Make sure we actually approximately find the closest k elements. Mostly this is about
     // ensuring that we have all the distance functions, comparators, priority queues and so on
     // oriented in the right directions
@@ -69,11 +95,10 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         similarityFunction = VectorSimilarityFunction.DOT_PRODUCT;
         RandomAccessVectorValues<T> vectors = circularVectorValues(nDoc);
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 10, 100, 1.0f, 1.4f);
-        var graph = TestUtil.buildSequentially(builder, vectors);
+        GraphIndexBuilderInterface<T> builder = getBuilder(vectors, vectorEncoding, similarityFunction, 10, 100, 1.0f, 1.4f);
+        var graph = buildSequentially(builder, vectors);
         // run some searches
-        SearchResult.NodeScore[] nn = GraphSearcher.search(getTargetVector(),
+        SearchResult.NodeScore[] nn = search(getTargetVector(),
                                                            10,
                                                            vectors.copy(),
                                                            getVectorEncoding(),
@@ -89,7 +114,7 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         }
         // We expect to get approximately 100% recall;
         // the lowest docIds are closest to zero; sum(0,9) = 45
-        assertTrue("sum(result docs)=" + sum + " for " + GraphIndex.prettyPrint(builder.graph), sum < 75);
+        assertTrue("sum(result docs)=" + sum + " for " + GraphIndex.prettyPrint(builder.getGraph()), sum < 75);
 
         for (int i = 0; i < nDoc; i++) {
             ConcurrentNeighborSet neighbors = graph.getNeighbors(i);
@@ -107,12 +132,12 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         RandomAccessVectorValues<T> vectors = circularVectorValues(nDoc);
         similarityFunction = VectorSimilarityFunction.DOT_PRODUCT;
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 16, 100, 1.0f, 1.4f);
-        var graph = TestUtil.buildSequentially(builder, vectors);
+        GraphIndexBuilderInterface<T> builder =
+                getBuilder(vectors, vectorEncoding, similarityFunction, 16, 100, 1.0f, 1.4f);
+        var graph = buildSequentially(builder, vectors);
         // the first 10 docs must not be deleted to ensure the expected recall
         Bits acceptOrds = createRandomAcceptOrds(10, nDoc);
-        SearchResult.NodeScore[] nn = GraphSearcher.search(getTargetVector(),
+        SearchResult.NodeScore[] nn = search(getTargetVector(),
                                                            10,
                                                            vectors.copy(),
                                                            getVectorEncoding(),
@@ -129,7 +154,7 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         }
         // We expect to get approximately 100% recall;
         // the lowest docIds are closest to zero; sum(0,9) = 45
-        assertTrue("sum(result docs)=" + sum + " for " + GraphIndex.prettyPrint(builder.graph), sum < 75);
+        assertTrue("sum(result docs)=" + sum + " for " + GraphIndex.prettyPrint(builder.getGraph()), sum < 75);
     }
 
     @Test
@@ -138,9 +163,9 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         RandomAccessVectorValues<T> vectors = circularVectorValues(nDoc);
         similarityFunction = VectorSimilarityFunction.DOT_PRODUCT;
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 16, 100, 1.0f, 1.4f);
-        var graph = TestUtil.buildSequentially(builder, vectors);
+        GraphIndexBuilderInterface<T> builder =
+                getBuilder(vectors, vectorEncoding, similarityFunction, 16, 100, 1.0f, 1.4f);
+        var graph = buildSequentially(builder, vectors);
         // Only mark a few vectors as accepted
         var acceptOrds = new FixedBitSet(nDoc);
         for (int i = 0; i < nDoc; i += nextInt(15, 20)) {
@@ -149,7 +174,7 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
 
         // Check the search finds all accepted vectors
         int numAccepted = acceptOrds.cardinality();
-        SearchResult.NodeScore[] nn = GraphSearcher.search(getTargetVector(),
+        SearchResult.NodeScore[] nn = search(getTargetVector(),
                                                            numAccepted,
                                                            vectors.copy(),
                                                            getVectorEncoding(),
@@ -161,13 +186,13 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         int[] nodes = Arrays.stream(nn).mapToInt(nodeScore -> nodeScore.node).toArray();
         for (int node : nodes) {
             assertTrue(String.format("the results include a deleted document: %d for %s",
-                                     node, GraphIndex.prettyPrint(builder.graph)), acceptOrds.get(node));
+                                     node, GraphIndex.prettyPrint(builder.getGraph())), acceptOrds.get(node));
         }
         for (int i = 0; i < acceptOrds.length(); i++) {
             if (acceptOrds.get(i)) {
                 int finalI = i;
                 assertTrue(String.format("the results do not include an accepted document: %d for %s",
-                                         i, GraphIndex.prettyPrint(builder.graph)), Arrays.stream(nodes).anyMatch(j -> j == finalI));
+                                         i, GraphIndex.prettyPrint(builder.getGraph())), Arrays.stream(nodes).anyMatch(j -> j == finalI));
             }
         }
     }
@@ -175,20 +200,20 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
     @Test
     public void testGraphIndexBuilderInvalid() {
         assertThrows(NullPointerException.class,
-                     () -> new GraphIndexBuilder<>(null, null, null, 0, 0, 1.0f, 1.0f));
+                     () -> getBuilder(null, null, null, 0, 0, 1.0f, 1.0f));
         // M must be > 0
         assertThrows(IllegalArgumentException.class,
                      () -> {
                          RandomAccessVectorValues<T> vectors = vectorValues(1, 1);
                          VectorEncoding vectorEncoding = getVectorEncoding();
-                         new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 0, 10, 1.0f, 1.0f);
+                         getBuilder(vectors, vectorEncoding, similarityFunction, 0, 10, 1.0f, 1.0f);
                      });
         // beamWidth must be > 0
         assertThrows(IllegalArgumentException.class,
                      () -> {
                          RandomAccessVectorValues<T> vectors = vectorValues(1, 1);
                          VectorEncoding vectorEncoding = getVectorEncoding();
-                         new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 10, 0, 1.0f, 1.0f);
+                         getBuilder(vectors, vectorEncoding, similarityFunction, 10, 0, 1.0f, 1.0f);
                      });
     }
 
@@ -213,43 +238,43 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         AbstractMockVectorValues<T> vectors = vectorValues(values);
         // First add nodes until everybody gets a full neighbor list
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 2, 10, 1.0f, 1.0f);
+        GraphIndexBuilderInterface<T> builder =
+                getBuilder(vectors, vectorEncoding, similarityFunction, 2, 10, 1.0f, 1.0f);
         // node 0 is added by the builder constructor
-        builder.addGraphNode(0, vectors);
-        builder.addGraphNode(1, vectors);
-        builder.addGraphNode(2, vectors);
+        addGraphNode(builder, 0, vectors);
+        addGraphNode(builder, 1, vectors);
+        addGraphNode(builder, 2, vectors);
         // now every node has tried to attach every other node as a neighbor, but
         // some were excluded based on diversity check.
-        assertLevel0Neighbors(builder.graph, 0, 1, 2);
-        assertLevel0Neighbors(builder.graph, 1, 0);
-        assertLevel0Neighbors(builder.graph, 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 2);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
 
-        builder.addGraphNode(3, vectors);
-        assertLevel0Neighbors(builder.graph, 0, 1, 2);
+        addGraphNode(builder, 3, vectors);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 2);
         // we added 3 here
-        assertLevel0Neighbors(builder.graph, 1, 0, 3);
-        assertLevel0Neighbors(builder.graph, 2, 0);
-        assertLevel0Neighbors(builder.graph, 3, 1);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0, 3);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 3, 1);
 
         // supplant an existing neighbor
-        builder.addGraphNode(4, vectors);
+        addGraphNode(builder, 4, vectors);
         // 4 is the same distance from 0 that 2 is; we leave the existing node in place
-        assertLevel0Neighbors(builder.graph, 0, 1, 2);
-        assertLevel0Neighbors(builder.graph, 1, 0, 3, 4);
-        assertLevel0Neighbors(builder.graph, 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 2);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0, 3, 4);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
         // 1 survives the diversity check
-        assertLevel0Neighbors(builder.graph, 3, 1, 4);
-        assertLevel0Neighbors(builder.graph, 4, 1, 3);
+        assertLevel0Neighbors(builder.getGraph(), 3, 1, 4);
+        assertLevel0Neighbors(builder.getGraph(), 4, 1, 3);
 
-        builder.addGraphNode(5, vectors);
-        assertLevel0Neighbors(builder.graph, 0, 1, 2);
-        assertLevel0Neighbors(builder.graph, 1, 0, 3, 4, 5);
-        assertLevel0Neighbors(builder.graph, 2, 0);
+        addGraphNode(builder,5, vectors);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 2);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0, 3, 4, 5);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
         // even though 5 is closer, 3 is not a neighbor of 5, so no update to *its* neighbors occurs
-        assertLevel0Neighbors(builder.graph, 3, 1, 4);
-        assertLevel0Neighbors(builder.graph, 4, 1, 3, 5);
-        assertLevel0Neighbors(builder.graph, 5, 1, 4);
+        assertLevel0Neighbors(builder.getGraph(), 3, 1, 4);
+        assertLevel0Neighbors(builder.getGraph(), 4, 1, 3, 5);
+        assertLevel0Neighbors(builder.getGraph(), 5, 1, 4);
     }
 
     @Test
@@ -269,23 +294,23 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         AbstractMockVectorValues<T> vectors = vectorValues(values);
         // First add nodes until everybody gets a full neighbor list
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 1, 10, 1.0f, 1.0f);
-        builder.addGraphNode(0, vectors);
-        builder.addGraphNode(1, vectors);
-        builder.addGraphNode(2, vectors);
-        assertLevel0Neighbors(builder.graph, 0, 1, 2);
+        GraphIndexBuilderInterface<T> builder =
+                getBuilder(vectors, vectorEncoding, similarityFunction, 1, 10, 1.0f, 1.0f);
+        addGraphNode(builder,0, vectors);
+        addGraphNode(builder,1, vectors);
+        addGraphNode(builder,2, vectors);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 2);
         // 2 is closer to 0 than 1, so it is excluded as non-diverse
-        assertLevel0Neighbors(builder.graph, 1, 0);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0);
         // 1 is closer to 0 than 2, so it is excluded as non-diverse
-        assertLevel0Neighbors(builder.graph, 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
 
-        builder.addGraphNode(3, vectors);
+        addGraphNode(builder,3, vectors);
         // this is one case we are testing; 2 has been displaced by 3
-        assertLevel0Neighbors(builder.graph, 0, 1, 3);
-        assertLevel0Neighbors(builder.graph, 1, 0);
-        assertLevel0Neighbors(builder.graph, 2, 0);
-        assertLevel0Neighbors(builder.graph, 3, 0);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 3);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 3, 0);
     }
 
     @Test
@@ -301,26 +326,26 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         AbstractMockVectorValues<T> vectors = vectorValues(values);
         // First add nodes until everybody gets a full neighbor list
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 1, 10, 1.0f, 1.0f);
-        builder.addGraphNode(0, vectors);
-        builder.addGraphNode(1, vectors);
-        builder.addGraphNode(2, vectors);
-        assertLevel0Neighbors(builder.graph, 0, 1, 2);
+        GraphIndexBuilderInterface<T> builder =
+                getBuilder(vectors, vectorEncoding, similarityFunction, 1, 10, 1.0f, 1.0f);
+        addGraphNode(builder,0, vectors);
+        addGraphNode(builder,1, vectors);
+        addGraphNode(builder,2, vectors);
+        assertLevel0Neighbors(builder.getGraph(), 0, 1, 2);
         // 2 is closer to 0 than 1, so it is excluded as non-diverse
-        assertLevel0Neighbors(builder.graph, 1, 0);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0);
         // 1 is closer to 0 than 2, so it is excluded as non-diverse
-        assertLevel0Neighbors(builder.graph, 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
 
-        builder.addGraphNode(3, vectors);
+        addGraphNode(builder,3, vectors);
         // this is one case we are testing; 1 has been displaced by 3
-        assertLevel0Neighbors(builder.graph, 0, 2, 3);
-        assertLevel0Neighbors(builder.graph, 1, 0, 3);
-        assertLevel0Neighbors(builder.graph, 2, 0);
-        assertLevel0Neighbors(builder.graph, 3, 0, 1);
+        assertLevel0Neighbors(builder.getGraph(), 0, 2, 3);
+        assertLevel0Neighbors(builder.getGraph(), 1, 0, 3);
+        assertLevel0Neighbors(builder.getGraph(), 2, 0);
+        assertLevel0Neighbors(builder.getGraph(), 3, 0, 1);
     }
 
-    private void assertLevel0Neighbors(OnHeapGraphIndex<T> graph, int node, int... expected) {
+    private void assertLevel0Neighbors(OnHeapGraphIndexInterface<T> graph, int node, int... expected) {
         Arrays.sort(expected);
         ConcurrentNeighborSet nn = graph.getNeighbors(node);
         Iterator<Integer> it = nn.iterator();
@@ -340,8 +365,8 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         AbstractMockVectorValues<T> vectors = vectorValues(size, dim);
         int topK = 5;
         VectorEncoding vectorEncoding = getVectorEncoding();
-        GraphIndexBuilder<T> builder =
-                new GraphIndexBuilder<>(vectors, vectorEncoding, similarityFunction, 10, 30, 1.0f, 1.4f);
+        GraphIndexBuilderInterface<T> builder =
+                getBuilder(vectors, vectorEncoding, similarityFunction, 10, 30, 1.0f, 1.4f);
         var graph = builder.build();
         Bits acceptOrds = getRandom().nextBoolean() ? Bits.ALL : createRandomAcceptOrds(0, size);
 
@@ -350,7 +375,7 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
         for (int i = 0; i < 100; i++) {
             SearchResult.NodeScore[] actual;
             T query = randomVector(dim);
-            actual = GraphSearcher.search(query,
+            actual = search(query,
                                           efSearch,
                                           vectors,
                                           getVectorEncoding(),
@@ -404,7 +429,7 @@ public abstract class GraphIndexTestCase<T> extends LuceneTestCase {
     @Test
     public void testConcurrentNeighbors() {
         RandomAccessVectorValues<T> vectors = circularVectorValues(3);
-        GraphIndexBuilder<T> builder =
+        GraphIndexBuilderInterface<T> builder =
                 new GraphIndexBuilder<>(vectors, getVectorEncoding(), similarityFunction, 1, 30, 1.0f, 1.0f) {
                     @Override
                     protected float scoreBetween(T v1, T v2) {

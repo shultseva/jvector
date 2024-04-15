@@ -18,10 +18,14 @@ package io.github.jbellis.jvector.graph;
 
 import io.github.jbellis.jvector.annotations.VisibleForTesting;
 import io.github.jbellis.jvector.disk.RandomAccessReader;
+import io.github.jbellis.jvector.graph.label.LabelConfig;
+import io.github.jbellis.jvector.graph.label.LabelsChecker;
 import io.github.jbellis.jvector.graph.label.LabelsSet;
+import io.github.jbellis.jvector.graph.label.MutableAccessVectorLabels;
 import io.github.jbellis.jvector.graph.label.RandomAccessVectorLabels;
 import io.github.jbellis.jvector.util.AtomicFixedBitSet;
 import io.github.jbellis.jvector.util.Bits;
+import io.github.jbellis.jvector.util.GrowableBitSet;
 import io.github.jbellis.jvector.util.PhysicalCoreExecutor;
 import io.github.jbellis.jvector.util.PoolingSupport;
 import io.github.jbellis.jvector.vector.VectorEncoding;
@@ -30,6 +34,7 @@ import io.github.jbellis.jvector.vector.VectorUtil;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Random;
@@ -38,9 +43,11 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.stream.IntStream;
 
 import static io.github.jbellis.jvector.util.DocIdSetIterator.NO_MORE_DOCS;
+import static java.util.stream.IntStream.range;
 
 /**
  * Builder for Concurrent GraphIndex. See {@link GraphIndex} for a high level overview, and the
@@ -48,7 +55,7 @@ import static io.github.jbellis.jvector.util.DocIdSetIterator.NO_MORE_DOCS;
  *
  * @param <T> the type of vector
  */
-public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
+public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
     private final int beamWidth;
     private final PoolingSupport<NodeArray> naturalScratch;
     private final PoolingSupport<NodeArray> concurrentScratch;
@@ -57,10 +64,10 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
     private final float neighborOverflow;
     private final float alpha;
     private final VectorEncoding vectorEncoding;
-    private final PoolingSupport<GraphSearcher<?>> graphSearcher;
+    private final PoolingSupport<LabeledGraphSearcher<?>> graphSearcher;
 
     @VisibleForTesting
-    final OnHeapGraphIndex<T> graph;
+    final LabeledOnHeapGraphIndex<T> graph;
     private final ConcurrentSkipListSet<Integer> insertionsInProgress = new ConcurrentSkipListSet<>();
 
     // We need two sources of vectors in order to perform diversity check comparisons without
@@ -68,6 +75,7 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
     // in the same method.  The only tricky place is in addGraphNode, which uses `vectors` immediately,
     // and `vectorsCopy` later on when defining the ScoreFunction for search.
     private final PoolingSupport<RandomAccessVectorValues<T>> vectors;
+    private final PoolingSupport<RandomAccessVectorLabels<LabelsSet>> labels;
     private final PoolingSupport<RandomAccessVectorValues<T>> vectorsCopy;
     private final int dimension; // for convenience so we don't have to go to the pool for this
     private final NodeSimilarity similarity;
@@ -75,7 +83,10 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
     private final ForkJoinPool simdExecutor;
     private final ForkJoinPool parallelExecutor;
 
-    private final AtomicInteger updateEntryNodeIn = new AtomicInteger(10_000);
+    private static final int INITIAL_UPDATE_MEDIOID_LIMIT = 10_000;
+    private final AtomicIntegerArray updateEntryNodesPerLabel = new AtomicIntegerArray(LabelConfig.MAX_NUMBER_OF_LABELS);
+
+    private final AtomicIntegerArray updateEntryNodesPerLabelStat = new AtomicIntegerArray(LabelConfig.MAX_NUMBER_OF_LABELS);
 
     /**
      * Reads all the vectors from vector values, builds a graph connecting them by their dense
@@ -91,15 +102,16 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      *                         allow longer edges.  If alpha = 1.0 then the equivalent of the lowest level of
      *                         an HNSW graph will be created, which is usually not what you want.
      */
-    public GraphIndexBuilder(
+    public LabeledGraphIndexBuilder(
             RandomAccessVectorValues<T> vectorValues,
+            RandomAccessVectorLabels<LabelsSet> vectorLabels,
             VectorEncoding vectorEncoding,
             VectorSimilarityFunction similarityFunction,
             int M,
             int beamWidth,
             float neighborOverflow,
             float alpha) {
-        this(vectorValues, vectorEncoding, similarityFunction, M, beamWidth, neighborOverflow, alpha,
+        this(vectorValues, vectorLabels, vectorEncoding, similarityFunction, M, beamWidth, neighborOverflow, alpha,
                 PhysicalCoreExecutor.pool(), ForkJoinPool.commonPool());
     }
 
@@ -120,8 +132,9 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      *                         the number of physical cores.
      * @param parallelExecutor ForkJoinPool instance for parallel stream operations
      */
-    public GraphIndexBuilder(
+    public LabeledGraphIndexBuilder(
             RandomAccessVectorValues<T> vectorValues,
+            RandomAccessVectorLabels<LabelsSet> vectorLabels,
             VectorEncoding vectorEncoding,
             VectorSimilarityFunction similarityFunction,
             int M,
@@ -132,6 +145,7 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
             ForkJoinPool parallelExecutor) {
         vectors = vectorValues.isValueShared() ? PoolingSupport.newThreadBased(vectorValues::copy) : PoolingSupport.newNoPooling(vectorValues);
         vectorsCopy = vectorValues.isValueShared() ? PoolingSupport.newThreadBased(vectorValues::copy) : PoolingSupport.newNoPooling(vectorValues);
+        labels = PoolingSupport.newThreadBased(vectorLabels::copy);
         dimension = vectorValues.dimension();
         this.vectorEncoding = Objects.requireNonNull(vectorEncoding);
         this.similarityFunction = Objects.requireNonNull(similarityFunction);
@@ -154,25 +168,33 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
             }
         };
         this.graph =
-                new OnHeapGraphIndex<>(
+                new LabeledOnHeapGraphIndex<>(
                         M, (node, m) -> new ConcurrentNeighborSet(node, m, similarity, alpha));
-        this.graphSearcher = PoolingSupport.newThreadBased(() -> new GraphSearcher.Builder<>(graph.getView()).withConcurrentUpdates().build());
+        int size = getGraph().getView().getIdUpperBound();
+        this.graphSearcher = PoolingSupport.newThreadBased(() -> new LabeledGraphSearcher<T>(getGraph().getView(), new GrowableBitSet(size)));
 
         // in scratch we store candidates in reverse order: worse candidates are first
         this.naturalScratch = PoolingSupport.newThreadBased(() -> new NodeArray(Math.max(beamWidth, M + 1)));
         this.concurrentScratch = PoolingSupport.newThreadBased(() -> new NodeArray(Math.max(beamWidth, M + 1)));
+        for (int i = 0; i < updateEntryNodesPerLabel.length(); i++) {
+            this.updateEntryNodesPerLabel.set(i, INITIAL_UPDATE_MEDIOID_LIMIT);
+        }
     }
 
-    public OnHeapGraphIndex<T> build() {
+    // not used
+    public LabeledOnHeapGraphIndex<T> build() {
         int size;
         try (var v = vectors.get()) {
             size = v.get().size();
         }
 
         simdExecutor.submit(() -> {
-            IntStream.range(0, size).parallel().forEach(i -> {
-                try (var v1 = vectors.get()) {
-                    addGraphNode(i, v1.get());
+            range(0, size).parallel().forEach(i -> {
+                try (
+                        var v1 = vectors.get();
+                        var l1 = labels.get()
+                ) {
+                    addGraphNode(i, v1.get(), l1.get());
                 }
             });
         }).join();
@@ -191,18 +213,20 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      * <p>
      * May be called multiple times, but should not be called during concurrent modifications to the graph.
      */
+    // todo
     public void cleanup() {
         if (graph.size() == 0) {
             return;
         }
-        graph.validateEntryNode(); // sanity check before we start
+        graph.validateEntryNodes(); // sanity check before we start
 
         // purge deleted nodes.
         // backlinks can cause neighbors to soft-overflow, so do this before neighbors cleanup
-        removeDeletedNodes();
+        // todo for labels
+        // removeDeletedNodes();
 
         // clean up overflowed neighbor lists
-        parallelExecutor.submit(() -> IntStream.range(0, graph.getIdUpperBound()).parallel().forEach(i -> {
+        parallelExecutor.submit(() -> range(0, graph.getIdUpperBound()).parallel().forEach(i -> {
             var neighbors = graph.getNeighbors(i);
             if (neighbors != null) {
                 neighbors.cleanup();
@@ -212,49 +236,149 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         // reconnect any orphaned nodes.  this will maintain neighbors size
         reconnectOrphanedNodes();
 
-        // optimize entry node
-        graph.updateEntryNode(approximateMedioid());
-        updateEntryNodeIn.set(graph.size()); // in case the user goes on to add more nodes after cleanup()
+        // optimize entry node for all labels
+        graph.entriesPure();
+        var allLabels = graph.labels();
+        int[] newEntryNodes = approximateMedioids(allLabels);
+        for (int i = 0; i < newEntryNodes.length; i++) {
+            var newEntryNode = newEntryNodes[i];
+            graph.updateEntryNode(newEntryNode, allLabels[i]);
+        }
+
+        // in case the user goes on to add more nodes after cleanup()
+        for (int i = 0; i < updateEntryNodesPerLabel.length(); i++) {
+            int finalI = i;
+            updateEntryNodesPerLabel.updateAndGet(finalI, current -> Math.max(INITIAL_UPDATE_MEDIOID_LIMIT, updateEntryNodesPerLabel.get(finalI)));
+        }
+
     }
 
+    // todo optimized - one traverse across graph
     private void reconnectOrphanedNodes() {
+        System.out.println("reconnectOrphanedNodes");
+        var entries = graph.entriesPure();
+        for (int i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            if (entry >= 0) {
+                reconnectOrphanedNodes(entries[i], i);
+            }
+        }
+    }
+
+//    private void reconnectOrphanedNodes() {
+//        // It's possible that reconnecting one node will result in disconnecting another, since we are maintaining
+//        // the maxConnections invariant.  In an extreme case, reconnecting node X disconnects Y, and reconnecting
+//        // Y disconnects X again.  So we do a best effort of 3 loops.
+//        for (int i = 0; i < 3; i++) {
+//            // find all nodes reachable from the entry node
+//            var connectedNodes = new AtomicFixedBitSet(graph.getIdUpperBound());
+//            for (var entry : graph.entries()) {
+//                connectedNodes.set(entry);
+//            }
+//            var entryNeighbors = graph.getNeighbors(graph.entry()).getCurrent();
+//            parallelExecutor.submit(() -> range(0, entryNeighbors.size).parallel().forEach(node -> {
+//                findConnected(connectedNodes, entryNeighbors.node[node]);
+//            })).join();
+//
+//            // reconnect unreachable nodes
+//            var nReconnected = new AtomicInteger();
+//            try (var gs = graphSearcher.get();
+//                 var pl = labels.get();
+//                 var v1 = vectors.get();
+//                 var v2 = vectorsCopy.get()) {
+//                var connectionTargets = new HashSet<Integer>();
+//                for (int node = 0; node < graph.getIdUpperBound(); node++) {
+//                    if (!connectedNodes.get(node) && graph.containsNode(node)) {
+//                        // search for the closest neighbors
+//                        var notSelfBits = createNotSelfBits(node);
+//                        var value = v1.get().vectorValue(node);
+//                        var nodeLabels = pl.get().vectorLabels(node);
+//                        NodeSimilarity.ExactScoreFunction scoreFunction = i1 -> scoreBetween(v2.get().vectorValue(i1), value);
+//                        LabelsChecker checker = n -> pl.get().vectorLabels(n).containsAtLeastOne(nodeLabels);
+//                        var result = gs.get().searchInternal(
+//                                scoreFunction,
+//                                null,
+//                                beamWidth,
+//                                0.0f,
+//                                graph.entries(),
+//                                notSelfBits,
+//                                checker
+//                        ).getNodes();
+//                        // connect this node to the closest neighbor that hasn't already been used as a connection target
+//                        // (since this edge is likely to be the "worst" one in that target's neighborhood, it's likely to be
+//                        // overwritten by the next node to need reconnection if we don't enforce uniqueness)
+//                        for (var ns : result) {
+//                            if (connectionTargets.add(ns.node)) {
+//                                graph.getNeighbors(ns.node).insertNotDiverse(node, ns.score, true);
+//                                break;
+//                            }
+//                        }
+//                        nReconnected.incrementAndGet();
+//                    }
+//                }
+//            }
+//            if (nReconnected.get() == 0) {
+//                break;
+//            }
+//        }
+//    }
+
+    private void reconnectOrphanedNodes(int entry, int label) {
         // It's possible that reconnecting one node will result in disconnecting another, since we are maintaining
         // the maxConnections invariant.  In an extreme case, reconnecting node X disconnects Y, and reconnecting
         // Y disconnects X again.  So we do a best effort of 3 loops.
         for (int i = 0; i < 3; i++) {
             // find all nodes reachable from the entry node
             var connectedNodes = new AtomicFixedBitSet(graph.getIdUpperBound());
-            connectedNodes.set(graph.entry());
-            var entryNeighbors = graph.getNeighbors(graph.entry()).getCurrent();
-            parallelExecutor.submit(() -> IntStream.range(0, entryNeighbors.size).parallel().forEach(node -> {
-                findConnected(connectedNodes, entryNeighbors.node[node]);
+            connectedNodes.set(entry);
+
+            var entryNeighbors = graph.getNeighbors(entry).getCurrent();
+            parallelExecutor.submit(() -> range(0, entryNeighbors.size).parallel().forEach(node -> {
+                findConnectedByLabel(connectedNodes, entryNeighbors.node[node], label);
             })).join();
 
             // reconnect unreachable nodes
             var nReconnected = new AtomicInteger();
             try (var gs = graphSearcher.get();
+                 var pl = labels.get();
                  var v1 = vectors.get();
-                 var v2 = vectorsCopy.get())
-            {
+                 var v2 = vectorsCopy.get()) {
                 var connectionTargets = new HashSet<Integer>();
                 for (int node = 0; node < graph.getIdUpperBound(); node++) {
-                    if (!connectedNodes.get(node) && graph.containsNode(node)) {
-                        // search for the closest neighbors
-                        var notSelfBits = createNotSelfBits(node);
-                        var value = v1.get().vectorValue(node);
-                        NodeSimilarity.ExactScoreFunction scoreFunction = i1 -> scoreBetween(v2.get().vectorValue(i1), value);
-                        var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, graph.entry(), notSelfBits).getNodes();
-                        // connect this node to the closest neighbor that hasn't already been used as a connection target
-                        // (since this edge is likely to be the "worst" one in that target's neighborhood, it's likely to be
-                        // overwritten by the next node to need reconnection if we don't enforce uniqueness)
-                        for (var ns : result) {
-                            if (connectionTargets.add(ns.node)) {
-                                graph.getNeighbors(ns.node).insertNotDiverse(node, ns.score, true);
-                                break;
-                            }
-                        }
-                        nReconnected.incrementAndGet();
+                    if (!graph.containsNode(node)) {
+                        continue;
                     }
+                    if (!pl.get().vectorLabels(node).contains(label)) {
+                        continue;
+                    }
+                    if (connectedNodes.get(node)) {
+                        continue;
+                    }
+
+                    // search for the closest neighbors
+                    var notSelfBits = createNotSelfBits(node);
+                    var value = v1.get().vectorValue(node);
+                    NodeSimilarity.ExactScoreFunction scoreFunction = i1 -> scoreBetween(v2.get().vectorValue(i1), value);
+                    LabelsChecker checker = n -> pl.get().vectorLabels(n).contains(label);
+                    var result = gs.get().searchInternal(
+                            scoreFunction,
+                            null,
+                            beamWidth,
+                            0.0f,
+                            graph.entries(),
+                            notSelfBits,
+                            checker
+                    ).getNodes();
+                    // connect this node to the closest neighbor that hasn't already been used as a connection target
+                    // (since this edge is likely to be the "worst" one in that target's neighborhood, it's likely to be
+                    // overwritten by the next node to need reconnection if we don't enforce uniqueness)
+                    for (var ns : result) {
+                        if (connectionTargets.add(ns.node)) {
+                            graph.getNeighbors(ns.node).insertNotDiverse(node, ns.score, true);
+                            break;
+                        }
+                    }
+                    nReconnected.incrementAndGet();
                 }
             }
             if (nReconnected.get() == 0) {
@@ -263,6 +387,7 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         }
     }
 
+    // get all nodes reachable from entry node
     private void findConnected(AtomicFixedBitSet connectedNodes, int start) {
         var queue = new ArrayDeque<Integer>();
         queue.add(start);
@@ -279,7 +404,29 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         }
     }
 
-    public OnHeapGraphIndex<T> getGraph() {
+    private void findConnectedByLabel(AtomicFixedBitSet connectedNodes, int start, int label) {
+        try (var pl = labels.get()) {
+            var queue = new ArrayDeque<Integer>();
+            queue.add(start);
+            var view = graph.getView();
+            while (!queue.isEmpty()) {
+                // DFS should result in less contention across findConnected threads than BFS
+                int next = queue.pop();
+                if (connectedNodes.getAndSet(next)) {
+                    continue;
+                }
+                for (var it = view.getNeighborsIterator(next); it.hasNext(); ) {
+                    int node = it.nextInt();
+                    if (!pl.get().vectorLabels(node).contains(label)) {
+                        continue;
+                    }
+                    queue.add(it.nextInt());
+                }
+            }
+        }
+    }
+
+    public LabeledOnHeapGraphIndex<T> getGraph() {
         return graph;
     }
 
@@ -288,11 +435,6 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      */
     public int insertsInProgress() {
         return insertionsInProgress.size();
-    }
-
-    @Override
-    public long addGraphNode(int node, RandomAccessVectorValues<T> vectors, RandomAccessVectorLabels<LabelsSet> labels) {
-        throw new UnsupportedOperationException("Use labeled indexed!");
     }
 
     /**
@@ -306,8 +448,10 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      * @param vectors the set of vectors
      * @return an estimate of the number of extra bytes used by the graph after adding the given node
      */
-    public long addGraphNode(int node, RandomAccessVectorValues<T> vectors) {
+    public long addGraphNode(int node, RandomAccessVectorValues<T> vectors, RandomAccessVectorLabels<LabelsSet> labels) {
         final T value = vectors.vectorValue(node);
+        final LabelsSet nodeLabels = labels.vectorLabels(node);
+        LabelsChecker labelsChecker = n -> labels.vectorLabels(n).containsAtLeastOne(nodeLabels);
 
         // do this before adding to in-progress, so a concurrent writer checking
         // the in-progress set doesn't have to worry about uninitialized neighbor sets
@@ -318,15 +462,14 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         try (var gs = graphSearcher.get();
              var vc = vectorsCopy.get();
              var naturalScratchPooled = naturalScratch.get();
-             var concurrentScratchPooled = concurrentScratch.get())
-        {
+             var concurrentScratchPooled = concurrentScratch.get()) {
             // find ANN of the new node by searching the graph
-            int ep = graph.entry();
+            int[] eps = graph.entries();
             NodeSimilarity.ExactScoreFunction scoreFunction = i -> scoreBetween(vc.get().vectorValue(i), value);
 
             var bits = new ExcludingBits(node);
             // find best "natural" candidates with a beam search
-            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, ep, bits);
+            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, eps, bits, labelsChecker);
 
             // Update neighbors with these candidates.
             // The DiskANN paper calls for using the entire set of visited nodes along the search path as
@@ -338,16 +481,29 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
             // найденные ближайшие узлы в отсортированном виде
             var natural = toScratchCandidates(result.getNodes(), result.getNodes().length, naturalScratchPooled.get());
             // узлы которые сейчас находятся в процессе добавление в отсортированном виде
-            var concurrent = getConcurrentCandidates(node, inProgressBefore, concurrentScratchPooled.get(), vectors, vc.get());
+            // тут только узлы с подходящими метками
+            var concurrent = getConcurrentCandidates(
+                    node,
+                    inProgressBefore,
+                    concurrentScratchPooled.get(),
+                    vectors,
+                    vc.get(),
+                    labelsChecker
+            );
             updateNeighbors(newNodeNeighbors, natural, concurrent);
 
-            maybeUpdateEntryPoint(node);
+            maybeUpdateEntryPoints(node, nodeLabels.get());
             maybeImproveOlderNode();
         } finally {
             insertionsInProgress.remove(node);
         }
 
         return graph.ramBytesUsedOneNode(0);
+    }
+
+    @Override
+    public long addGraphNode(int node, RandomAccessVectorValues<T> vectors) {
+        throw new UnsupportedOperationException("Label supplier is required!");
     }
 
     /**
@@ -357,8 +513,8 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      * This has negligible effect on ML embedding-sized vectors, starting at least with GloVe-25, so we don't bother.
      * (Dimensions between 4 and 25 are untested but they get left out too.)
      * For 2D vectors, this takes us to over 99% recall up to at least 4M nodes.  (Higher counts untested.)
-    */
-    private void maybeImproveOlderNode() {
+     */
+    protected void maybeImproveOlderNode() {
         // pick a node added earlier at random to improve its connections
         // 20k threshold chosen because that's where recall starts to fall off from 100% for 2D vectors
         if (dimension <= 3 && graph.size() > 20_000) {
@@ -375,30 +531,52 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         }
     }
 
-    private void maybeUpdateEntryPoint(int node) {
-        graph.maybeSetInitialEntryNode(node); // TODO it seems silly to call this long after we've set it the first time
+    protected void maybeUpdateEntryPoints(int node, int[] labels) {
+        int[] labelsNeedsToUpdateEntryPoint = new int[labels.length];
+        Arrays.fill(labelsNeedsToUpdateEntryPoint, -1);
+        int index = 0;
+        for (int label : labels) {
+            if (updateEntryNodesPerLabelStat.getAndIncrement(label) == 0) {
+                graph.maybeSetInitialEntryNode(node, label);
+            }
+            if (updateEntryNodesPerLabel.decrementAndGet(label) == 0) {
+                labelsNeedsToUpdateEntryPoint[index] = label;
+                index++;
+            }
+        }
+        if (index == 0) {
+            return;
+        }
+        // trim
+        labelsNeedsToUpdateEntryPoint = Arrays.copyOf(labelsNeedsToUpdateEntryPoint, index);
 
-        if (updateEntryNodeIn.decrementAndGet() == 0) {
-            int newEntryNode = approximateMedioid();
-            graph.updateEntryNode(newEntryNode);
+        int[] newEntryNodes = approximateMedioids(labelsNeedsToUpdateEntryPoint);
+        for (int i = 0; i < newEntryNodes.length; i++) {
+            var newEntryNode = newEntryNodes[i];
+            var label = labelsNeedsToUpdateEntryPoint[i];
+            graph.updateEntryNode(newEntryNode, label);
             improveConnections(newEntryNode);
-            updateEntryNodeIn.addAndGet(graph.size());
+            updateEntryNodesPerLabel.addAndGet(label, updateEntryNodesPerLabelStat.get(label));
         }
     }
 
     public void improveConnections(int node) {
-        try (var pv = vectors.get();
-             var gs = graphSearcher.get();
-             var vc = vectorsCopy.get();
-             var naturalScratchPooled = naturalScratch.get())
-        {
+        try (
+                var pv = vectors.get();
+                var pl = labels.get();
+                var gs = graphSearcher.get();
+                var vc = vectorsCopy.get();
+                var naturalScratchPooled = naturalScratch.get()
+        ) {
             final T value = pv.get().vectorValue(node);
 
             // find ANN of the new node by searching the graph
-            int ep = graph.entry();
+            int[] eps = graph.entries();
             NodeSimilarity.ExactScoreFunction scoreFunction = i -> scoreBetween(vc.get().vectorValue(i), value);
+            var nodeLabelsSet = pl.get().vectorLabels(node);
+            LabelsChecker checker = n -> pl.get().vectorLabels(n).containsAtLeastOne(nodeLabelsSet);
             var bits = new ExcludingBits(node);
-            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, ep, bits);
+            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, eps, bits, checker);
             var natural = toScratchCandidates(result.getNodes(), result.getNodes().length, naturalScratchPooled.get());
             updateNeighbors(graph.getNeighbors(node), natural, NodeArray.EMPTY);
         }
@@ -433,8 +611,7 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         var affectedLiveNodes = new HashSet<Integer>();
         var R = new Random();
         try (var v1 = vectors.get();
-             var v2 = vectorsCopy.get())
-        {
+             var v2 = vectorsCopy.get()) {
             for (var node : liveNodes) {
                 assert !deletedNodes.get(node);
 
@@ -465,6 +642,7 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         }
 
         // update entry node if old one was deleted
+
         if (deletedNodes.get(graph.entry())) {
             if (graph.size() > 0) {
                 graph.updateEntryNode(graph.getNodes().nextInt());
@@ -489,21 +667,21 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
      * new neighbors.  Standard diversity pruning applies.
      */
     private void addNNDescentConnections(int node) {
-        var notSelfBits = createNotSelfBits(node);
-
-        try (var gs = graphSearcher.get();
-             var v1 = vectors.get();
-             var v2 = vectorsCopy.get();
-             var scratch = naturalScratch.get())
-        {
-            var value = v1.get().vectorValue(node);
-            NodeSimilarity.ExactScoreFunction scoreFunction = i -> scoreBetween(v2.get().vectorValue(i), value);
-            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, graph.entry(), notSelfBits);
-            var candidates = toScratchCandidates(result.getNodes(), result.getNodes().length, scratch.get());
-            // We use just the topK results as candidates, which is much less expensive than computing scores for
-            // the other visited nodes.  See comments in addGraphNode.
-            updateNeighbors(graph.getNeighbors(node), candidates, NodeArray.EMPTY);
-        }
+        throw new UnsupportedOperationException("addNNDescentConnections");
+//        var notSelfBits = createNotSelfBits(node);
+//
+//        try (var gs = graphSearcher.get();
+//             var v1 = vectors.get();
+//             var v2 = vectorsCopy.get();
+//             var scratch = naturalScratch.get()) {
+//            var value = v1.get().vectorValue(node);
+//            NodeSimilarity.ExactScoreFunction scoreFunction = i -> scoreBetween(v2.get().vectorValue(i), value);
+//            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, graph.entry(), notSelfBits);
+//            var candidates = toScratchCandidates(result.getNodes(), result.getNodes().length, scratch.get());
+//            // We use just the topK results as candidates, which is much less expensive than computing scores for
+//            // the other visited nodes.  See comments in addGraphNode.
+//            updateNeighbors(graph.getNeighbors(node), candidates, NodeArray.EMPTY);
+//        }
     }
 
     private static Bits createNotSelfBits(int node) {
@@ -521,38 +699,63 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         };
     }
 
-    private int approximateMedioid() {
+    private int[] approximateMedioids(int[] updatedLabels) {
         assert graph.size() > 0;
 
         if (vectorEncoding != VectorEncoding.FLOAT32) {
-            // fill this in when/if we care about byte[] vectors
-            return graph.entry();
+            throw new UnsupportedOperationException("byte encoding not implemented");
         }
 
-        try (var gs = graphSearcher.get();
-             var vc = vectorsCopy.get())
-        {
+        int[] result = new int[updatedLabels.length];
+        try (
+                var gs = graphSearcher.get();
+                var vc = vectorsCopy.get();
+                var lc = this.labels.get()
+        ) {
+            LabelsChecker newNodeLabelChecker = n -> lc.get().vectorLabels(n).containsAtLeastOne(MutableAccessVectorLabels.asLabelSet(updatedLabels));
             // compute centroid
-            var centroid = new float[dimension];
+            float[][] centroids = new float[updatedLabels.length][dimension];
             for (var it = graph.getNodes(); it.hasNext(); ) {
                 var node = it.nextInt();
-                VectorUtil.addInPlace(centroid, (float[]) vc.get().vectorValue(node));
+                if (!newNodeLabelChecker.hasLables(node)) {
+                    continue;
+                }
+                for (int i = 0; i < updatedLabels.length; i++) {
+                    if (lc.get().vectorLabels(node).contains(updatedLabels[i]))
+                        VectorUtil.addInPlace(centroids[i], (float[]) vc.get().vectorValue(node));
+                }
             }
-            VectorUtil.divInPlace(centroid, graph.size());
+            for (int i = 0; i < centroids.length; i++) {
+                var centroid = centroids[i];
+                var currentLabel = updatedLabels[i];
+                VectorUtil.divInPlace(centroid, updateEntryNodesPerLabelStat.get(currentLabel));
 
-            // search for the node closest to the centroid
-            NodeSimilarity.ExactScoreFunction scoreFunction = i -> scoreBetween(vc.get().vectorValue(i), (T) centroid);
-            var result = gs.get().searchInternal(scoreFunction, null, beamWidth, 0.0f, graph.entry(), Bits.ALL);
-            return result.getNodes()[0].node;
+                // search for the node closest to the centroid
+                NodeSimilarity.ExactScoreFunction scoreFunction = n -> scoreBetween(vc.get().vectorValue(n), (T) centroid);
+                LabelsChecker labelsChecker =
+                        n -> lc.get().vectorLabels(n).containsAtLeastOne(MutableAccessVectorLabels.singletonLabelSet(currentLabel));
+                var labelResult = gs.get().searchInternal(
+                        scoreFunction,
+                        null,
+                        beamWidth,
+                        0.0f,
+                        graph.entries(),
+                        Bits.ALL,
+                        labelsChecker
+                );
+                result[i] = labelResult.getNodes()[0].node;
+            }
+
+            return result;
         }
     }
 
-    private void updateNeighbors(ConcurrentNeighborSet neighbors, NodeArray natural, NodeArray concurrent) {
+    protected void updateNeighbors(ConcurrentNeighborSet neighbors, NodeArray natural, NodeArray concurrent) {
         neighbors.insertDiverse(natural, concurrent);
         neighbors.backlink(graph::getNeighbors, neighborOverflow);
     }
 
-    private NodeArray toScratchCandidates(SearchResult.NodeScore[] candidates, int count, NodeArray scratch) {
+    NodeArray toScratchCandidates(SearchResult.NodeScore[] candidates, int count, NodeArray scratch) {
         scratch.clear();
         for (int i = 0; i < count; i++) {
             var candidate = candidates[i];
@@ -561,15 +764,15 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         return scratch;
     }
 
-    private NodeArray getConcurrentCandidates(int newNode,
-                                              Set<Integer> inProgress,
-                                              NodeArray scratch,
-                                              RandomAccessVectorValues<T> values,
-                                              RandomAccessVectorValues<T> valuesCopy)
-    {
+    protected NodeArray getConcurrentCandidates(int newNode,
+                                                Set<Integer> inProgress,
+                                                NodeArray scratch,
+                                                RandomAccessVectorValues<T> values,
+                                                RandomAccessVectorValues<T> valuesCopy,
+                                                LabelsChecker labelsChecker) {
         scratch.clear();
         for (var n : inProgress) {
-            if (n != newNode) {
+            if (n != newNode && labelsChecker.hasLables(n)) {
                 scratch.insertSorted(
                         n,
                         scoreBetween(values.vectorValue(newNode), valuesCopy.vectorValue(n)));
@@ -633,5 +836,9 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         }
 
         graph.updateEntryNode(entryNode);
+    }
+
+    private boolean hasCommonValues(Set<Integer> a, Set<Integer> b) {
+        return a.stream().anyMatch(b::contains);
     }
 }

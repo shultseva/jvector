@@ -24,6 +24,8 @@
 
 package io.github.jbellis.jvector.graph;
 
+import io.github.jbellis.jvector.graph.label.EntriesGraphView;
+import io.github.jbellis.jvector.graph.label.LabelConfig;
 import io.github.jbellis.jvector.util.Accountable;
 import io.github.jbellis.jvector.util.BitSet;
 import io.github.jbellis.jvector.util.Bits;
@@ -34,10 +36,12 @@ import io.github.jbellis.jvector.util.RamUsageEstimator;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.function.BiFunction;
 import java.util.stream.IntStream;
 
@@ -48,10 +52,13 @@ import java.util.stream.IntStream;
  * <p>To search this graph, you should use a View obtained from {@link #getView()} to perform `seek`
  * and `nextNeighbor` operations.
  */
-public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accountable {
+public class LabeledOnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accountable {
 
     // the current graph entry node on the top level. -1 if not set
-    private final AtomicInteger entryPoint = new AtomicInteger(-1);
+    private final AtomicIntegerArray entryPoints;
+
+    private final Map<Integer, Integer> entryToMainLabels = new HashMap<>();
+    private final AtomicInteger labelsCount = new AtomicInteger(0);
 
     private final DenseIntMap<ConcurrentNeighborSet> nodes;
     private final BitSet deletedNodes = new GrowableBitSet(0);
@@ -61,10 +68,13 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
     final int maxDegree;
     private final BiFunction<Integer, Integer, ConcurrentNeighborSet> neighborFactory;
 
-    OnHeapGraphIndex(int M, BiFunction<Integer, Integer, ConcurrentNeighborSet> neighborFactory) {
+    LabeledOnHeapGraphIndex(int M, BiFunction<Integer, Integer, ConcurrentNeighborSet> neighborFactory) {
         this.neighborFactory = neighborFactory;
         this.maxDegree = 2 * M;
         this.nodes = new DenseIntMap<>(1024);
+        var labels = new int[LabelConfig.MAX_NUMBER_OF_LABELS];
+        Arrays.fill(labels, -1);
+        this.entryPoints = new AtomicIntegerArray(labels);
     }
 
     /**
@@ -118,20 +128,38 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
         deletedNodes.set(node);
     }
 
-    /** must be called after addNode once neighbors are linked in all levels. */
-    void maybeSetInitialEntryNode(int node) {
-        entryPoint.accumulateAndGet(node,
-                                    (oldEntry, newEntry) -> {
-                                        if (oldEntry >= 0) {
-                                            return oldEntry;
-                                        } else {
-                                            return newEntry;
-                                        }
-                                    });
+    /**
+     * must be called after addNode once neighbors are linked in all levels.
+     */
+    void maybeSetInitialEntryNode(int node, int label) {
+        entryPoints.accumulateAndGet(
+                label,
+                node,
+                (oldEntry, newEntry) -> {
+                    if (oldEntry >= 0) {
+                        return oldEntry;
+                    } else {
+                        labelsCount.incrementAndGet();
+                        entryToMainLabels.put(newEntry, label);
+                        return newEntry;
+                    }
+                }
+        );
     }
 
-    void updateEntryNode(int node) {
-        entryPoint.set(node);
+    void maybeSetInitialEntryNode(int node) {
+        throw new UnsupportedOperationException("maybeSetInitialEntryNode");
+    }
+
+    void updateEntryNode(int node, int label) {
+        var prev = entryPoints.getAndSet(label, node);
+        if (prev < -1) {
+            labelsCount.incrementAndGet();
+        }
+    }
+
+    public void updateEntryNode(int i) {
+        throw new UnsupportedOperationException("updateEntryNode");
     }
 
     @Override
@@ -139,17 +167,55 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
         return maxDegree;
     }
 
+    int entry(int label) {
+        return entryPoints.get(label);
+    }
+
     int entry() {
-        return entryPoint.get();
+        throw new UnsupportedOperationException("entry");
+    }
+
+    // return all node ids that are entry point for some label
+    int[] entries() {
+        // todo races
+        int[] nodes = new int[labelsCount.get()];
+        int j = 0;
+        for (int i = 0; i < LabelConfig.MAX_NUMBER_OF_LABELS; i++) {
+            var value = entryPoints.get(i);
+            if (value >= 0) {
+                nodes[j] = entryPoints.get(i);
+                j++;
+            }
+        }
+        return nodes;
+    }
+
+    int[] entriesPure() {
+        // todo races
+        int[] nodes = new int[entryPoints.length()];
+        for (int i = 0; i < entryPoints.length(); i++) {
+            nodes[i] = entryPoints.get(i);
+
+        }
+        return nodes;
+    }
+
+    int[] labels() {
+        int[] labels = new int[labelsCount.get()];
+        int j = 0;
+        for (int i = 0; i < LabelConfig.MAX_NUMBER_OF_LABELS; i++) {
+            var value = entryPoints.get(i);
+            if (value >= 0) {
+                labels[j] = i;
+                j++;
+            }
+        }
+        return labels;
     }
 
     @Override
     public NodesIterator getNodes() {
         return nodes.getNodesIterator();
-    }
-
-    public int startNode() {
-        return this.entry();
     }
 
     // TMP
@@ -167,7 +233,7 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
             }
             representation.put(node, nbrsList);
         }
-        return  representation;
+        return representation;
     }
 
     @Override
@@ -204,7 +270,7 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
 
     @Override
     public String toString() {
-        return String.format("OnHeapGraphIndex(size=%d, entryPoint=%d)", size(), entryPoint.get());
+        return String.format("OnHeapGraphIndex(size=%d, entryPoint=%s)", size(), Arrays.toString(entries()));
     }
 
     @Override
@@ -219,17 +285,35 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
      * <p>Multiple Views may be searched concurrently.
      */
     @Override
-    public GraphIndex.View<T> getView() {
-        return new ConcurrentGraphIndexView();
+    public EntriesGraphView<T> getView() {
+        return new ConcurrentFewEntriesGraphIndexView();
     }
 
-    void validateEntryNode() {
+    void validateEntryNode(int label) {
         if (size() == 0) {
             return;
         }
-        var en = entryPoint.get();
+        var en = entryPoints.get(label);
         if (!(en >= 0 && getNeighbors(en) != null)) {
             throw new IllegalStateException("Entry node was incompletely added! " + en);
+        }
+    }
+
+    void validateEntryNodes() {
+        if (size() == 0) {
+            return;
+        }
+        // todo races? may be not a problem
+        // todo what we check??
+        int completedCounter = 0;
+        for (int i = 0; i < entryPoints.length(); i++) {
+            var en = entryPoints.get(i);
+            if (en >= 0 && getNeighbors(en) != null) { // en < 0 || getNeighbors(en) == null
+                completedCounter++;
+            }
+        }
+        if (completedCounter != labelsCount.get()) {
+            throw new IllegalStateException("Some entry nodes was incompletely added!");
         }
     }
 
@@ -274,7 +358,7 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
                 .orElse(Double.NaN);
     }
 
-    private class ConcurrentGraphIndexView implements GraphIndex.View<T> {
+    private class ConcurrentFewEntriesGraphIndexView implements EntriesGraphView<T> {
         @Override
         public T getVector(int node) {
             throw new UnsupportedOperationException("All searches done with OnHeapGraphIndex should be exact");
@@ -286,17 +370,17 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
 
         @Override
         public int size() {
-            return OnHeapGraphIndex.this.size();
+            return LabeledOnHeapGraphIndex.this.size();
         }
 
         @Override
         public int entryNode() {
-            return entryPoint.get();
+            return entryPoints.get(0);
         }
 
         @Override
         public String toString() {
-            return "OnHeapGraphIndexView(size=" + size() + ", entryPoint=" + entryPoint.get();
+            return "OnHeapGraphIndexView(size=" + size() + ", entryPoint=" + entryPoints;
         }
 
         @Override
@@ -308,12 +392,27 @@ public class OnHeapGraphIndex<T> implements OnHeapGraphIndexInterface<T>, Accoun
 
         @Override
         public int getIdUpperBound() {
-            return OnHeapGraphIndex.this.getIdUpperBound();
+            return LabeledOnHeapGraphIndex.this.getIdUpperBound();
         }
 
         @Override
         public void close() {
             // no-op
+        }
+
+        @Override
+        public int[] entryNodes() {
+            // todo races
+            int[] nodes = new int[labelsCount.get()];
+            int j = 0;
+            for (int i = 0; i < LabelConfig.MAX_NUMBER_OF_LABELS; i++) {
+                var value = entryPoints.get(i);
+                if (value >= 0) {
+                    nodes[j] = entryPoints.get(i);
+                    j++;
+                }
+            }
+            return nodes;
         }
     }
 
