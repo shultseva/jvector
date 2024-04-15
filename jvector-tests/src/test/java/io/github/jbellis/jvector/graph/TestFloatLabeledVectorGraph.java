@@ -13,7 +13,7 @@ import org.junit.Test;
 
 import java.util.function.Function;
 
-import static io.github.jbellis.jvector.graph.label.MutableAccessVectorLabels.singletonLabelSet;
+import static io.github.jbellis.jvector.graph.label.impl.BitLabelSet.asLabelSet;
 import static org.junit.Assert.assertTrue;
 
 public class TestFloatLabeledVectorGraph extends TestFloatVectorGraph {
@@ -27,7 +27,7 @@ public class TestFloatLabeledVectorGraph extends TestFloatVectorGraph {
 
         @Override
         public LabelsSet vectorLabels(int targetOrd) {
-            return singletonLabelSet(1);
+            return asLabelSet(1);
         }
 
         @Override

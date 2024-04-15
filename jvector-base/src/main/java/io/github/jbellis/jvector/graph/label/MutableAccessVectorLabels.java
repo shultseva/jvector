@@ -1,12 +1,13 @@
 package io.github.jbellis.jvector.graph.label;
 
-import java.util.Arrays;
-import java.util.Objects;
+import io.github.jbellis.jvector.graph.label.impl.BitLabelSet;
+import io.github.jbellis.jvector.graph.label.impl.Int2SortedIntArrayHashMap;
 
 public class MutableAccessVectorLabels implements RandomAccessVectorLabels<LabelsSet>{
 
-    int MAX_NUMBER_OF_NODES = 100_000;
-    Int2SortedIntArrayHashMap vectorLabelsMap = new Int2SortedIntArrayHashMap(MAX_NUMBER_OF_NODES, 0.9);
+    int INITIAL_NUMBER_OF_NODES = 100_000;
+    //todo Int2BitSet
+    Int2SortedIntArrayHashMap vectorLabelsMap = new Int2SortedIntArrayHashMap(INITIAL_NUMBER_OF_NODES, 0.9);
 
     public MutableAccessVectorLabels(Int2SortedIntArrayHashMap vectorLabelsMap) {
         this.vectorLabelsMap = vectorLabelsMap;
@@ -22,15 +23,7 @@ public class MutableAccessVectorLabels implements RandomAccessVectorLabels<Label
 
     @Override
     public LabelsSet vectorLabels(int targetOrd) {
-        return new LabelsSetAsIntArray(vectorLabelsMap.get(targetOrd));
-    }
-
-    public static LabelsSetAsIntArray singletonLabelSet(int label) {
-        return new LabelsSetAsIntArray(new int[] {label});
-    }
-
-    public static LabelsSetAsIntArray asLabelSet(int[] label) {
-        return new LabelsSetAsIntArray(label);
+        return BitLabelSet.asLabelSet(vectorLabelsMap.get(targetOrd));
     }
 
     @Override
@@ -42,33 +35,4 @@ public class MutableAccessVectorLabels implements RandomAccessVectorLabels<Label
         vectorLabelsMap.put(node, labels);
     }
 
-    public static class LabelsSetAsIntArray implements LabelsSet {
-
-        private final int[] labels;
-        private LabelsSetAsIntArray(int[] labels) {
-            this.labels = labels;
-        }
-
-        @Override
-        public boolean contains(int label) {
-            var index = Arrays.binarySearch(labels, label);
-            return index >= 0;
-        }
-
-        @Override
-        public boolean containsAtLeastOne(LabelsSet other) {
-            return ArraysUtils.hasCommon(this.labels, other.get());
-        }
-
-        @Override
-        public int[] get() {
-            return labels;
-        }
-
-        @Override
-        public int get(int i) {
-            Objects.checkIndex(i, labels.length);
-            return labels[i];
-        }
-    }
 }

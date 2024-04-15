@@ -1,4 +1,4 @@
-package io.github.jbellis.jvector.graph.label;
+package io.github.jbellis.jvector.graph.label.impl;
 
 import java.util.Arrays;
 

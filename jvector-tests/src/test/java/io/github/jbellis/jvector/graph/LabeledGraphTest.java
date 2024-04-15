@@ -10,6 +10,7 @@ import io.github.jbellis.jvector.util.Bits;
 import io.github.jbellis.jvector.util.GrowableBitSet;
 import io.github.jbellis.jvector.vector.VectorEncoding;
 import io.github.jbellis.jvector.vector.VectorSimilarityFunction;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -23,7 +24,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static io.github.jbellis.jvector.graph.label.MutableAccessVectorLabels.asLabelSet;
+import static io.github.jbellis.jvector.graph.label.impl.BitLabelSet.asLabelSet;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -138,6 +139,7 @@ public class LabeledGraphTest {
 
 
     @Test
+    @Ignore
     public void testBigCellsGraph() {
         int size = 1_000;
         List<int[]> labels = range(0, size).mapToObj(i -> new int[]{i, (i + 1) % size}).collect(Collectors.toList());

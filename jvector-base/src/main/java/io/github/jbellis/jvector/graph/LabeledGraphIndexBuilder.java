@@ -21,7 +21,6 @@ import io.github.jbellis.jvector.disk.RandomAccessReader;
 import io.github.jbellis.jvector.graph.label.LabelConfig;
 import io.github.jbellis.jvector.graph.label.LabelsChecker;
 import io.github.jbellis.jvector.graph.label.LabelsSet;
-import io.github.jbellis.jvector.graph.label.MutableAccessVectorLabels;
 import io.github.jbellis.jvector.graph.label.RandomAccessVectorLabels;
 import io.github.jbellis.jvector.util.AtomicFixedBitSet;
 import io.github.jbellis.jvector.util.Bits;
@@ -45,6 +44,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 
+import static io.github.jbellis.jvector.graph.label.impl.BitLabelSet.asLabelSet;
 import static io.github.jbellis.jvector.util.DocIdSetIterator.NO_MORE_DOCS;
 import static java.util.stream.IntStream.range;
 
@@ -254,73 +254,18 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
 
     // todo optimized - one traverse across graph
     private void reconnectOrphanedNodes() {
-        System.out.println("reconnectOrphanedNodes");
         var entries = graph.entriesPure();
         for (int i = 0; i < entries.length; i++) {
             var entry = entries[i];
             if (entry >= 0) {
-                reconnectOrphanedNodes(entries[i], i);
+ //               try {
+                    reconnectOrphanedNodes(entries[i], i);
+ //               } catch (Exception e) {
+ //                   System.out.println(e);
+ //               }
             }
         }
     }
-
-//    private void reconnectOrphanedNodes() {
-//        // It's possible that reconnecting one node will result in disconnecting another, since we are maintaining
-//        // the maxConnections invariant.  In an extreme case, reconnecting node X disconnects Y, and reconnecting
-//        // Y disconnects X again.  So we do a best effort of 3 loops.
-//        for (int i = 0; i < 3; i++) {
-//            // find all nodes reachable from the entry node
-//            var connectedNodes = new AtomicFixedBitSet(graph.getIdUpperBound());
-//            for (var entry : graph.entries()) {
-//                connectedNodes.set(entry);
-//            }
-//            var entryNeighbors = graph.getNeighbors(graph.entry()).getCurrent();
-//            parallelExecutor.submit(() -> range(0, entryNeighbors.size).parallel().forEach(node -> {
-//                findConnected(connectedNodes, entryNeighbors.node[node]);
-//            })).join();
-//
-//            // reconnect unreachable nodes
-//            var nReconnected = new AtomicInteger();
-//            try (var gs = graphSearcher.get();
-//                 var pl = labels.get();
-//                 var v1 = vectors.get();
-//                 var v2 = vectorsCopy.get()) {
-//                var connectionTargets = new HashSet<Integer>();
-//                for (int node = 0; node < graph.getIdUpperBound(); node++) {
-//                    if (!connectedNodes.get(node) && graph.containsNode(node)) {
-//                        // search for the closest neighbors
-//                        var notSelfBits = createNotSelfBits(node);
-//                        var value = v1.get().vectorValue(node);
-//                        var nodeLabels = pl.get().vectorLabels(node);
-//                        NodeSimilarity.ExactScoreFunction scoreFunction = i1 -> scoreBetween(v2.get().vectorValue(i1), value);
-//                        LabelsChecker checker = n -> pl.get().vectorLabels(n).containsAtLeastOne(nodeLabels);
-//                        var result = gs.get().searchInternal(
-//                                scoreFunction,
-//                                null,
-//                                beamWidth,
-//                                0.0f,
-//                                graph.entries(),
-//                                notSelfBits,
-//                                checker
-//                        ).getNodes();
-//                        // connect this node to the closest neighbor that hasn't already been used as a connection target
-//                        // (since this edge is likely to be the "worst" one in that target's neighborhood, it's likely to be
-//                        // overwritten by the next node to need reconnection if we don't enforce uniqueness)
-//                        for (var ns : result) {
-//                            if (connectionTargets.add(ns.node)) {
-//                                graph.getNeighbors(ns.node).insertNotDiverse(node, ns.score, true);
-//                                break;
-//                            }
-//                        }
-//                        nReconnected.incrementAndGet();
-//                    }
-//                }
-//            }
-//            if (nReconnected.get() == 0) {
-//                break;
-//            }
-//        }
-//    }
 
     private void reconnectOrphanedNodes(int entry, int label) {
         // It's possible that reconnecting one node will result in disconnecting another, since we are maintaining
@@ -332,9 +277,11 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
             connectedNodes.set(entry);
 
             var entryNeighbors = graph.getNeighbors(entry).getCurrent();
-            parallelExecutor.submit(() -> range(0, entryNeighbors.size).parallel().forEach(node -> {
-                findConnectedByLabel(connectedNodes, entryNeighbors.node[node], label);
-            })).join();
+            parallelExecutor.submit(
+                    () -> range(0, entryNeighbors.size).parallel().forEach(
+                            node -> findConnectedByLabel(connectedNodes, entryNeighbors.node[node], label)
+                    )
+            ).join();
 
             // reconnect unreachable nodes
             var nReconnected = new AtomicInteger();
@@ -711,7 +658,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
                 var vc = vectorsCopy.get();
                 var lc = this.labels.get()
         ) {
-            LabelsChecker newNodeLabelChecker = n -> lc.get().vectorLabels(n).containsAtLeastOne(MutableAccessVectorLabels.asLabelSet(updatedLabels));
+            LabelsChecker newNodeLabelChecker = n -> lc.get().vectorLabels(n).containsAtLeastOne(asLabelSet(updatedLabels));
             // compute centroid
             float[][] centroids = new float[updatedLabels.length][dimension];
             for (var it = graph.getNodes(); it.hasNext(); ) {
@@ -732,7 +679,9 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
                 // search for the node closest to the centroid
                 NodeSimilarity.ExactScoreFunction scoreFunction = n -> scoreBetween(vc.get().vectorValue(n), (T) centroid);
                 LabelsChecker labelsChecker =
-                        n -> lc.get().vectorLabels(n).containsAtLeastOne(MutableAccessVectorLabels.singletonLabelSet(currentLabel));
+                        n -> lc.get().vectorLabels(n).containsAtLeastOne(
+                                asLabelSet(currentLabel)
+                        );
                 var labelResult = gs.get().searchInternal(
                         scoreFunction,
                         null,

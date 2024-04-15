@@ -1,6 +1,6 @@
 package io.github.jbellis.jvector;
 
-import io.github.jbellis.jvector.graph.label.Int2SortedIntArrayHashMap;
+import io.github.jbellis.jvector.graph.label.impl.Int2SortedIntArrayHashMap;
 import org.junit.Test;
 
 import java.util.function.BiFunction;

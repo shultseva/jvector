@@ -8,5 +8,4 @@ public interface LabelsSet {
 
     int[] get();
 
-    int get(int i);
  }
