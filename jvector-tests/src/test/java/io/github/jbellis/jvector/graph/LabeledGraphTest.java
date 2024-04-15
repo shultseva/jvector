@@ -194,9 +194,7 @@ public class LabeledGraphTest {
         int[] searchLabels = new int[] {1, 2};
         var kTop = 5;
         Map<Integer, NodeInfo> searchResultLabel = search(searchVector, kTop, graph.getView(), vectorsValue, vectorsLabels, searchLabels);
-        assertThat(searchResultLabel).allSatisfy((k, node) -> {
-            assertThat(node.labels).containsAnyOf(searchLabels);
-        });
+        assertThat(searchResultLabel).allSatisfy((k, node) -> assertThat(node.labels).containsAnyOf(searchLabels));
         System.out.println(searchResultLabel);
     }
 
@@ -377,9 +375,5 @@ public class LabeledGraphTest {
                     ", labels=" + Arrays.toString(labels) +
                     '}';
         }
-    }
-
-    private void assertHasAtLeastOneLabel(MutableAccessVectorLabels labelsProvider, Map<Integer, Float> result, Set<Integer> labels) {
-
     }
 }

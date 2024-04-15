@@ -82,7 +82,7 @@ public class TestFloatLabeledVectorGraph extends TestFloatVectorGraph {
     public void testConcurrentNeighbors() {
         RandomAccessVectorValues<float[]> vectors = circularVectorValues(3);
         GraphIndexBuilderInterface<float[]> builder =
-                new LabeledGraphIndexBuilder<float[]>(vectors, vectorLabels.apply(vectors.size()), getVectorEncoding(), similarityFunction, 1, 30, 1.0f, 1.0f) {
+                new LabeledGraphIndexBuilder<>(vectors, vectorLabels.apply(vectors.size()), getVectorEncoding(), similarityFunction, 1, 30, 1.0f, 1.0f) {
                     @Override
                     protected float scoreBetween(float[] v1, float[] v2) {
                         try {

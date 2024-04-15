@@ -177,9 +177,9 @@ public class LabeledGraphSearcher<T> {
 
 
     public static class LabelSearchOption {
-        private int[] labels;
+        private final int[] labels;
 
-        private Condition condition;
+        private final Condition condition;
 
         public LabelSearchOption(int[] labels, Condition condition) {
             this.labels = labels;

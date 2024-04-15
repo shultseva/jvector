@@ -1,6 +1,5 @@
 package io.github.jbellis.jvector.graph.label;
 
-import io.github.jbellis.jvector.util.BitSet;
 import io.github.jbellis.jvector.util.FixedBitSet;
 
 import java.util.Arrays;

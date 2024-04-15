@@ -3,8 +3,6 @@ package io.github.jbellis.jvector;
 import io.github.jbellis.jvector.graph.label.ArraysUtils;
 import org.junit.Test;
 
-import java.util.Arrays;
-
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 

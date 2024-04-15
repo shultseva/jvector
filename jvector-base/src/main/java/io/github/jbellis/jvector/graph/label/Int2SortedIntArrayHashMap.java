@@ -3,7 +3,6 @@ package io.github.jbellis.jvector.graph.label;
 import java.util.Arrays;
 
 import static java.util.Objects.requireNonNull;
-import static org.apache.commons.math3.util.MathUtils.checkNotNull;
 
 public class Int2SortedIntArrayHashMap {
     /**

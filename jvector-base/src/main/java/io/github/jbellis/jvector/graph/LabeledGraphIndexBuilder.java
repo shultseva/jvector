@@ -44,7 +44,6 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
-import java.util.stream.IntStream;
 
 import static io.github.jbellis.jvector.util.DocIdSetIterator.NO_MORE_DOCS;
 import static java.util.stream.IntStream.range;
@@ -836,9 +835,5 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         }
 
         graph.updateEntryNode(entryNode);
-    }
-
-    private boolean hasCommonValues(Set<Integer> a, Set<Integer> b) {
-        return a.stream().anyMatch(b::contains);
     }
 }
