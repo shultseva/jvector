@@ -4,16 +4,21 @@ import io.github.jbellis.jvector.graph.label.LabelsSet;
 
 import java.util.Arrays;
 import java.util.BitSet;
+import java.util.Objects;
 
 public class BitLabelSet implements LabelsSet {
 
-    private final BitSet bitSet;
+    protected final BitSet bitSet;
 
     public BitLabelSet(int[] labels) {
         this.bitSet = new BitSet(labels.length);
         for (var label : labels) {
             bitSet.set(label);
         }
+    }
+
+    private BitLabelSet(BitSet other) {
+        this.bitSet = other;
     }
 
     @Override
@@ -28,6 +33,23 @@ public class BitLabelSet implements LabelsSet {
             return bitSet.intersects(otherBitSet.bitSet);
         }
         return false;
+    }
+
+    @Override
+    public LabelsSet intersect(LabelsSet other) {
+        var copy = (BitSet) bitSet.clone();
+        if (other instanceof BitLabelSet) {
+            var otherBitSet = (BitLabelSet) other;
+            copy.and(otherBitSet.bitSet);
+            return new BitLabelSet(copy);
+        }
+        throw new RuntimeException("");
+    }
+
+    @Override
+    public boolean include(LabelsSet other) {
+        var intersect = this.intersect(other);
+        return other.equals(intersect);
     }
 
     @Override
@@ -50,5 +72,22 @@ public class BitLabelSet implements LabelsSet {
 
     public static LabelsSet asLabelSet(int[] label) {
         return new BitLabelSet(label);
+    }
+
+    @Override
+    public boolean equals(Object object) {
+        if (this == object) {
+            return true;
+        }
+        if (object == null || getClass() != object.getClass()) {
+            return false;
+        }
+        BitLabelSet that = (BitLabelSet) object;
+        return Objects.equals(bitSet, that.bitSet);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(bitSet);
     }
 }

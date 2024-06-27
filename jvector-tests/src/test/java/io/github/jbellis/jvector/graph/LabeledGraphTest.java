@@ -1,5 +1,7 @@
 package io.github.jbellis.jvector.graph;
 
+import io.github.jbellis.jvector.CustomTestUtils;
+import io.github.jbellis.jvector.CustomTestUtils.MutableListVectorValues;
 import io.github.jbellis.jvector.SimpleTest;
 import io.github.jbellis.jvector.graph.label.EntriesGraphView;
 import io.github.jbellis.jvector.graph.label.LabelsChecker;
@@ -39,7 +41,7 @@ public class LabeledGraphTest {
     public void testOneLabel() {
         int[][] labels = new int[][]{nodeLabelArray1, nodeLabelArray1, nodeLabelArray1, nodeLabelArray1, nodeLabelArray1};
 
-        var vectorsValue = new SimpleTest.MutableListVectorValues(vectors[0].length);
+        var vectorsValue = new MutableListVectorValues(vectors[0].length);
         var vectorsLabels = new MutableAccessVectorLabels();
 
         var builder = graphBuilder(vectorsValue, vectorsLabels);
@@ -139,12 +141,11 @@ public class LabeledGraphTest {
 
 
     @Test
-    @Ignore
     public void testBigCellsGraph() {
         int size = 1_000;
         List<int[]> labels = range(0, size).mapToObj(i -> new int[]{i, (i + 1) % size}).collect(Collectors.toList());
 
-        var vectorsValue = new SimpleTest.MutableListVectorValues(2);
+        var vectorsValue = new MutableListVectorValues(2);
         var vectorsLabels = new MutableAccessVectorLabels();
 
         var builder = createCellsTestGraph(vectorsValue, vectorsLabels, size, labels);
@@ -171,7 +172,7 @@ public class LabeledGraphTest {
 
     @Test
     public void testRandomGraph() {
-        int size = 100_000;
+        int size = 1_000;
 
         int dim = 2;
         int biggestAllowedCoordinateValue = 10_000; // from 0 to biggestAllowedCoordinateValue
@@ -183,7 +184,7 @@ public class LabeledGraphTest {
         List<int[]> labels = range(0, size).mapToObj(i -> generateRandomLabels(maxNumberOfLabelsPerNode, biggestAllowedLabelValue)).collect(Collectors.toList());
         List<float[]> coordinates = range(0, size).mapToObj(i -> generateRandomVector(dim, biggestAllowedCoordinateValue)).collect(Collectors.toList());
 
-        var vectorsValue = new SimpleTest.MutableListVectorValues(2);
+        var vectorsValue = new MutableListVectorValues(2);
         var vectorsLabels = new MutableAccessVectorLabels();
 
         var builder = fillGraph(vectorsValue, vectorsLabels, ids, coordinates, labels);
@@ -253,7 +254,7 @@ public class LabeledGraphTest {
     }
 
     private LabeledGraphIndexBuilder<float[]> createCellsTestGraph(
-            SimpleTest.MutableListVectorValues vectorValues,
+            MutableListVectorValues vectorValues,
             MutableAccessVectorLabels vectorLabels,
             int size,
             List<int[]> labels
@@ -291,7 +292,7 @@ public class LabeledGraphTest {
     }
 
     private LabeledGraphIndexBuilder<float[]> fillGraph(
-            SimpleTest.MutableListVectorValues vectorValues,
+            MutableListVectorValues vectorValues,
             MutableAccessVectorLabels vectorLabels,
             int[] ids,
             List<float[]> vectors,

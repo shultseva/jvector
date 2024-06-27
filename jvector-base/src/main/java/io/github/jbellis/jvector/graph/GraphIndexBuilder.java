@@ -156,6 +156,7 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
         this.graph =
                 new OnHeapGraphIndex<>(
                         M, (node, m) -> new ConcurrentNeighborSet(node, m, similarity, alpha));
+
         this.graphSearcher = PoolingSupport.newThreadBased(() -> new GraphSearcher.Builder<>(graph.getView()).withConcurrentUpdates().build());
 
         // in scratch we store candidates in reverse order: worse candidates are first
@@ -209,12 +210,16 @@ public class GraphIndexBuilder<T> implements GraphIndexBuilderInterface<T> {
             }
         })).join();
 
-        // reconnect any orphaned nodes.  this will maintain neighbors size
-        reconnectOrphanedNodes();
+        if (graph.size() > 0) {
+            // reconnect any orphaned nodes.  this will maintain neighbors size
+            reconnectOrphanedNodes();
+            // optimize entry node
+            graph.updateEntryNode(approximateMedioid());
+            updateEntryNodeIn.set(graph.size()); // in case the user goes on to add more nodes after cleanup()
+        } else {
+            updateEntryNodeIn.set(10_000); // default value for empty graph
+        }
 
-        // optimize entry node
-        graph.updateEntryNode(approximateMedioid());
-        updateEntryNodeIn.set(graph.size()); // in case the user goes on to add more nodes after cleanup()
     }
 
     private void reconnectOrphanedNodes() {

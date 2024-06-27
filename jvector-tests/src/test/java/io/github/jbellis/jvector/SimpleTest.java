@@ -4,11 +4,13 @@ import io.github.jbellis.jvector.graph.GraphIndex;
 import io.github.jbellis.jvector.graph.GraphIndexBuilder;
 import io.github.jbellis.jvector.graph.GraphSearcher;
 import io.github.jbellis.jvector.graph.ListRandomAccessVectorValues;
+import io.github.jbellis.jvector.graph.NodeQueue;
 import io.github.jbellis.jvector.graph.NodeSimilarity;
 import io.github.jbellis.jvector.graph.RandomAccessVectorValues;
 import io.github.jbellis.jvector.graph.SearchResult;
 import io.github.jbellis.jvector.util.Bits;
 import io.github.jbellis.jvector.util.FixedBitSet;
+import io.github.jbellis.jvector.util.GrowableLongHeap;
 import io.github.jbellis.jvector.util.SparseFixedBitSet;
 import io.github.jbellis.jvector.vector.VectorEncoding;
 import io.github.jbellis.jvector.vector.VectorSimilarityFunction;
@@ -29,12 +31,257 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static java.util.stream.IntStream.range;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class SimpleTest {
+
+
+    @Test
+    public void optimizationDeterministic() {
+        int size = 10_000;
+        int dim = 100;
+
+        var vectorsValue = new CustomTestUtils.MutableListVectorValues(dim);
+        var builder1 = CustomTestUtils.graphBuilder(vectorsValue, VectorSimilarityFunction.EUCLIDEAN, 16, 100);
+        var builder2 = CustomTestUtils.graphBuilder(vectorsValue, VectorSimilarityFunction.EUCLIDEAN, 16, 100);
+
+        List<Integer> order1 = new ArrayList<>();
+        List<Integer> order2 = new ArrayList<>();
+        for (int i = 0; i < size; i++) {
+            vectorsValue.put(i, CustomTestUtils.generateRandomVector(dim));
+            order1.add(i);
+            order2.add(i);
+        }
+
+        //Collections.shuffle(order1);
+        //Collections.shuffle(order2);
+
+        order1.forEach(i -> builder1.addGraphNode(i, vectorsValue));
+        order2.forEach(i -> builder2.addGraphNode(i, vectorsValue));
+
+       // builder2.addGraphNode(100, vectorsValue);
+
+        builder1.cleanup();
+        builder2.cleanup();
+
+        var graph1 = builder1.getGraph().getGraphRepresentation();
+        var graph2 = builder2.getGraph().getGraphRepresentation();
+        var entry1 = builder1.getGraph().getView().entryNode();
+        var entry2 = builder2.getGraph().getView().entryNode();
+
+        assertEquals(entry1, entry2);
+        assertEquals(graph1, graph2);
+        var v = CustomTestUtils.generateRandomVector(dim);
+        var r1 = CustomTestUtils.searchEuclidean(v, 10, builder1, vectorsValue);
+        var r2 = CustomTestUtils.searchEuclidean(v, 10, builder2, vectorsValue);
+        assertEquals(r1, r2);
+
+    }
+
+    @Test
+    public void minAcceptedSimilarity() {
+        float negativeInf = Float.NEGATIVE_INFINITY;
+        float non = Float.NaN;
+        float minFloat = -Float.MAX_VALUE;
+
+        var candidates = new NodeQueue(new GrowableLongHeap(100), NodeQueue.Order.MAX_HEAP);
+        candidates.push(1, negativeInf);
+        candidates.push(2, 2);
+
+        while (candidates.size() > 0) {
+            var score = candidates.topScore();
+            var candidate = candidates.pop();
+            System.out.println(candidate + " " + score);
+
+        }
+
+//        System.out.println(-Float.MAX_VALUE >= Float.NEGATIVE_INFINITY);
+//        System.out.println(Float.NaN >= Float.NEGATIVE_INFINITY);
+//        System.out.println(Float.NaN >= 0);
+//        System.out.println(Float.NaN < 0);
+//        System.out.println(Float.NaN < Float.NEGATIVE_INFINITY);
+//
+//        float value = Float.NaN;
+//
+//        assertFalse(value >= Float.NEGATIVE_INFINITY);
+//        assertFalse(value < Float.NEGATIVE_INFINITY);
+//        assertFalse(value < 0);
+    }
+
+    @Test
+    public void delete() {
+        var vectorsValue = new MutableListVectorValues(2);
+        var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.EUCLIDEAN);
+
+        addNode(vectorsValue, builder, 1, new float[]{1, 0});
+
+        builder.markNodeDeleted(1);
+        builder.getGraph().getDeletedNodes().clear(1);
+
+        addNode(vectorsValue, builder, 1, new float[]{1, 0});
+
+        GraphSearcher<float[]> searcher = new GraphSearcher.Builder<>(builder.getGraph().getView()).withConcurrentUpdates().build();
+        var searchVector = new float[]{0, 0};
+        var result1 = searchEuclidean(searchVector, 10, searcher, vectorsValue);
+
+        System.out.println(result1);
+    }
+
+
+    @Test
+    public void cleanUpAfterOneVector() {
+        var vectorsValue = new MutableListVectorValues(2);
+        var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.DOT_PRODUCT);
+
+        addNode(vectorsValue, builder, 1, new float[]{-1, 0});
+
+        builder.markNodeDeleted(1);
+        builder.cleanup();
+        // assertEquals(1, builder.getGraph().size());
+        // fails because centroid of (-1, 0) and (1, 0) set a (0, 0)
+        addNode(vectorsValue, builder, 2, new float[]{2, 0}); // пытается пересчитать медиод но нет блидайшего элемента
+        addNode(vectorsValue, builder, 3, new float[]{3, 0});
+        addNode(vectorsValue, builder, 4, new float[]{4, 0});
+//        builder.cleanup();
+//
+//        assertEquals(1, builder.getGraph().size() - builder.getGraph().getDeletedNodes().length());
+//        addNode(vectorsValue, builder, 3, new float[]{3, 0});
+
+        var graph = builder.getGraph();
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+    }
+
+    private void printGraphRepresentation(GraphIndexBuilder builder) {
+        var graph = builder.getGraph();
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+        System.out.println("removed: " + graph.getDeletedNodes().cardinality());
+    }
+
+    @Test
+    public void cleanUpAfterOneVector2() {
+        var vectorsValue = new MutableListVectorValues(2);
+
+        var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.DOT_PRODUCT);
+
+        addNode(vectorsValue, builder, 1, new float[]{-1, 0});
+        addNode(vectorsValue, builder, 2, new float[]{-2, 0});
+        addNode(vectorsValue, builder, 3, new float[]{-3, 0});
+        builder.cleanup();
+        builder.markNodeDeleted(1);
+        builder.markNodeDeleted(2);
+        builder.markNodeDeleted(3);
+        //      builder.cleanup();
+        assertEquals(3, builder.getGraph().size());
+        // fails because centroid of (-1, 0) and (1, 0) set a (0, 0)
+        addNode(vectorsValue, builder, 4, new float[]{1, 0});
+        builder.cleanup();
+        addNode(vectorsValue, builder, 5, new float[]{2, 0});
+        addNode(vectorsValue, builder, 6, new float[]{3, 0});
+//        builder.cleanup();
+//
+//        assertEquals(1, builder.getGraph().size() - builder.getGraph().getDeletedNodes().length());
+//        addNode(vectorsValue, builder, 3, new float[]{3, 0});
+
+        var graph = builder.getGraph();
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+    }
+
+    @Test
+    public void failedTest() {
+        var vectorsValue = new MutableListVectorValues(2);
+
+        var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.COSINE);
+
+        addNode(vectorsValue, builder, 1, new float[]{-1, 0});
+        //       builder.markNodeDeleted(0);
+        builder.cleanup();
+//        assertEquals(1, builder.getGraph().size());
+
+        addNode(vectorsValue, builder, 2, new float[]{1, 0});
+//
+//        assertEquals(1, builder.getGraph().size() - builder.getGraph().getDeletedNodes().length());
+//        addNode(vectorsValue, builder, 3, new float[]{3, 0});
+
+        var graph = builder.getGraph();
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+    }
+
+    @Test
+    public void deleteAllRootNode() {
+        var vectorsValue = new MutableListVectorValues(2);
+
+        var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.EUCLIDEAN);
+
+        addNode(vectorsValue, builder, 0, new float[]{0, 1});
+        builder.markNodeDeleted(0);
+        // builder.cleanup();
+        assertEquals(1, builder.getGraph().size());
+
+        addNode(vectorsValue, builder, 2, new float[]{1, 0});
+
+        assertEquals(1, builder.getGraph().size() - builder.getGraph().getDeletedNodes().length());
+        addNode(vectorsValue, builder, 3, new float[]{3, 0});
+
+        var graph = builder.getGraph();
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+
+    }
+
+    @Test
+    public void reuseOfSearcher() {
+        var vectorsValue = new MutableListVectorValues(2);
+
+        var builder = graphBuilder(vectorsValue, VectorSimilarityFunction.EUCLIDEAN);
+        var graph = builder.getGraph();
+        addNode(vectorsValue, builder, 0, new float[]{0, 0});
+        addNode(vectorsValue, builder, 1, new float[]{1, 1});
+        addNode(vectorsValue, builder, 2, new float[]{2, 3});
+        addNode(vectorsValue, builder, 3, new float[]{5, 4});
+
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+
+        var searchVector = new float[]{2, 0};
+
+        NodeSimilarity.ExactScoreFunction scoreFunction = (j) -> VectorSimilarityFunction.EUCLIDEAN.compare(searchVector, vectorsValue.vectorValue(j));
+
+        GraphSearcher<float[]> searcher = new GraphSearcher.Builder<>(graph.getView()).build();
+
+        SearchResult searchResult = searcher.search(scoreFunction, null, 10, new Bits.MatchAllBits());
+        List<Pair<Integer, Float>> resultsList = new ArrayList<>();
+        for (SearchResult.NodeScore nodeScore : searchResult.getNodes()) {
+            resultsList.add(new Pair<>(nodeScore.node, nodeScore.score));
+        }
+        System.out.println(resultsList);
+
+        var searchVector2 = new float[]{20, 20};
+
+        NodeSimilarity.ExactScoreFunction scoreFunction2 = (j) -> VectorSimilarityFunction.EUCLIDEAN.compare(searchVector2, vectorsValue.vectorValue(j));
+
+        SearchResult searchResult2 = searcher.search(scoreFunction2, null, 10, new Bits.MatchAllBits());
+        List<Pair<Integer, Float>> resultsList2 = new ArrayList<>();
+        for (SearchResult.NodeScore nodeScore : searchResult2.getNodes()) {
+            resultsList2.add(new Pair<>(nodeScore.node, nodeScore.score));
+        }
+        System.out.println(resultsList2);
+    }
 
     @Test
     public void dedup() {
@@ -159,11 +406,11 @@ public class SimpleTest {
         System.out.println("final:" + graphRepresentation);
         System.out.println("start:" + graph.startNode());
 
-        for(int i = -100; i < 200; i++) {
-            for(int j = -100; j < 200; j++) {
+        for (int i = -100; i < 200; i++) {
+            for (int j = -100; j < 200; j++) {
                 var searchVector = new float[]{0, 0};
                 List<Pair<Integer, Float>> results = searchEuclidean(searchVector, 3, graph.getView(), vectorsValue, Collections.emptySet());
-                for(var res: results) {
+                for (var res : results) {
                     assertTrue(res.getFirst() < 100);
                 }
             }
@@ -288,6 +535,44 @@ public class SimpleTest {
         System.out.println(t2);
     }
 
+
+    @Test
+    public void BrokenGraph_withCosineSimple() {
+        var vectorsValue = new MutableListVectorValues(2);
+        GraphIndexBuilder builder = new GraphIndexBuilder(
+                vectorsValue,
+                VectorEncoding.FLOAT32,
+                VectorSimilarityFunction.COSINE,
+                1, // number of neighbors = M * 2
+                5,
+                1.2f,
+                1.4f
+        );
+        var graph = builder.getGraph();
+        addNode(vectorsValue, builder, 0, new float[]{1, 1});
+
+        addNode(vectorsValue, builder, 1, new float[]{1, 2});
+
+        addNode(vectorsValue, builder, 10, new float[]{2, 2});
+
+        addNode(vectorsValue, builder, 11, new float[]{1, 3});
+
+        addNode(vectorsValue, builder, 20, new float[]{3, 3});
+
+        addNode(vectorsValue, builder, 21, new float[]{1, 4});
+
+        var graphRepresentation = graph.getGraphRepresentation();
+        System.out.println("final:" + graphRepresentation);
+        System.out.println("start:" + graph.startNode());
+
+        var searchVector = new float[]{1, 1};
+
+        var result1 = search(searchVector, 10, graph.getView(), vectorsValue, Collections.emptySet(), VectorSimilarityFunction.COSINE);
+        System.out.println("***********");
+        System.out.println(result1);
+
+    }
+
     @Test
     public void generateRandomGraph() throws IOException {
         int size = 1000;
@@ -328,7 +613,7 @@ public class SimpleTest {
 
         for (int i = 0; i <= vectorsValue.maxOrd; i++) {
             var vector = vectorsValue.vectors.getOrDefault(i, null);
-            if(vector == null) {
+            if (vector == null) {
                 continue;
             }
             vectorWriter.println(i + ", " + vector[0] + ", " + vector[1]);
@@ -341,7 +626,7 @@ public class SimpleTest {
         edgesWriter.close();
     }
 
-    private void addNode(MutableListVectorValues vectorsValue, GraphIndexBuilder builder, int id, float[] vector) {
+    private void addNode(MutableListVectorValues vectorsValue, GraphIndexBuilder<float[]> builder, int id, float[] vector) {
         vectorsValue.put(id, vector);
         builder.addGraphNode(id, new VectorValueSupplier(() -> vector));
     }
@@ -433,6 +718,10 @@ public class SimpleTest {
         public void put(int targetOrd, float[] vector) {
             vectors.put(targetOrd, vector);
             maxOrd = Math.max(targetOrd, maxOrd);
+        }
+
+        public void delete(int targetOrd) {
+            vectors.remove(targetOrd);
         }
 
         @Override
@@ -541,6 +830,19 @@ public class SimpleTest {
         );
 
         return builder;
+    }
+
+    public static List<Pair<Integer, Float>> searchEuclidean(float[] vector, int topK, GraphSearcher<float[]> searcher, RandomAccessVectorValues<float[]> vectorsValue) {
+
+        NodeSimilarity.ExactScoreFunction scoreFunction = (j) -> VectorSimilarityFunction.EUCLIDEAN.compare(vector, vectorsValue.vectorValue(j));
+
+        Bits mask = new Bits.MatchAllBits();
+        SearchResult searchResult = searcher.search(scoreFunction, null, topK, mask);
+        List<Pair<Integer, Float>> resultsList = new ArrayList<>();
+        for (SearchResult.NodeScore nodeScore : searchResult.getNodes()) {
+            resultsList.add(new Pair<>(nodeScore.node, nodeScore.score));
+        }
+        return resultsList;
     }
 
     public static List<Pair<Integer, Float>> searchEuclidean(float[] vector, int topK, GraphIndex.View<float[]> graphIndex, RandomAccessVectorValues<float[]> vectorsValue, Set<Integer> filter) {

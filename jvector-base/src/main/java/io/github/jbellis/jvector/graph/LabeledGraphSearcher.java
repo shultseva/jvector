@@ -74,7 +74,7 @@ public class LabeledGraphSearcher<T> {
         int numVisited = 0;
 
         for (int ep : entryPoints) {
-            if (!labelChecker.hasLables(ep)) {
+            if (!labelChecker.hasCommonLabels(ep)) {
                 continue;
             }
             if (visited.getAndSet(ep)) {
@@ -118,7 +118,7 @@ public class LabeledGraphSearcher<T> {
             // add its neighbors to the candidates queue
             for (var it = view.getNeighborsIterator(topCandidateNode); it.hasNext(); ) {
                 int friendOrd = it.nextInt();
-                if (!labelChecker.hasLables(friendOrd)) {
+                if (!labelChecker.hasCommonLabels(friendOrd)) {
                     continue;
                 }
                 if (visited.getAndSet(friendOrd)) {

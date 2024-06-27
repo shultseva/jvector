@@ -35,13 +35,13 @@ Add by one: size = 1000000, dim = 10, coordinated = [0 -  100000]. Total time: 1
 
     @Test
     public void testPerformance() {
-        byParallel(10_000, 20, 0, 1_000);
-        byParallel(100_000, 20, 0, 10_000);
+    //    byParallel(10_000, 20, 0, 1_000);
+    //    byParallel(100_000, 20, 0, 10_000);
       //  byParallel(1_000_000, 20, 0, 10_000);
 
-        byOne(10_000, 20, 0, 1_000);
-        byOne(100_000, 20, 0, 10_000);
-      //  byOne(1_000_000, 20, 0, 100_000);
+     //   byOne(10_000, 20, 0, 1_000);
+      //  byOne(100_000, 20, 0, 10_000);
+        byOne(1_000_000, 20, 0, 100_000);
     }
 
     @Test
@@ -132,7 +132,9 @@ Add by one: size = 1000000, dim = 10, coordinated = [0 -  100000]. Total time: 1
 
     public void addByOne(GraphIndexBuilder builder, MutableAccessVectorValues vectors) {
         int size = vectors.size();
-        IntStream.range(0, size).forEach(i -> builder.addGraphNode(i, vectors));
+        for(int i = 0; i < size; i++) {
+            builder.addGraphNode(i, vectors);
+        }
     }
 
     public void addByOne(GraphIndexBuilder builder, MutableAccessVectorValues vectors, int from, int to) {

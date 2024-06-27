@@ -43,6 +43,8 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static io.github.jbellis.jvector.graph.label.impl.BitLabelSet.asLabelSet;
 import static io.github.jbellis.jvector.util.DocIdSetIterator.NO_MORE_DOCS;
@@ -83,8 +85,8 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
     private final ForkJoinPool parallelExecutor;
 
     private static final int INITIAL_UPDATE_MEDIOID_LIMIT = 10_000;
-    private final AtomicIntegerArray updateEntryNodesPerLabel = new AtomicIntegerArray(LabelConfig.MAX_NUMBER_OF_LABELS);
 
+    private final AtomicIntegerArray updateEntryNodesPerLabel = new AtomicIntegerArray(LabelConfig.MAX_NUMBER_OF_LABELS);
     private final AtomicIntegerArray updateEntryNodesPerLabelStat = new AtomicIntegerArray(LabelConfig.MAX_NUMBER_OF_LABELS);
 
     /**
@@ -168,13 +170,15 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         };
         this.graph =
                 new LabeledOnHeapGraphIndex<>(
-                        M, (node, m) -> new ConcurrentNeighborSet(node, m, similarity, alpha));
+                        M, (node, m) -> new ConcurrentNeighborSet(node, m, similarity, alpha)
+                );
         int size = getGraph().getView().getIdUpperBound();
         this.graphSearcher = PoolingSupport.newThreadBased(() -> new LabeledGraphSearcher<>(getGraph().getView(), new GrowableBitSet(size)));
 
         // in scratch we store candidates in reverse order: worse candidates are first
         this.naturalScratch = PoolingSupport.newThreadBased(() -> new NodeArray(Math.max(beamWidth, M + 1)));
         this.concurrentScratch = PoolingSupport.newThreadBased(() -> new NodeArray(Math.max(beamWidth, M + 1)));
+        // todo let's number of labels pass as an input argument
         for (int i = 0; i < updateEntryNodesPerLabel.length(); i++) {
             this.updateEntryNodesPerLabel.set(i, INITIAL_UPDATE_MEDIOID_LIMIT);
         }
@@ -256,11 +260,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         for (int i = 0; i < entries.length; i++) {
             var entry = entries[i];
             if (entry >= 0) {
- //               try {
-                    reconnectOrphanedNodes(entries[i], i);
- //               } catch (Exception e) {
- //                   System.out.println(e);
- //               }
+                reconnectOrphanedNodes(entries[i], i);
             }
         }
     }
@@ -331,23 +331,8 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         }
     }
 
-    // get all nodes reachable from entry node
-    private void findConnected(AtomicFixedBitSet connectedNodes, int start) {
-        var queue = new ArrayDeque<Integer>();
-        queue.add(start);
-        var view = graph.getView();
-        while (!queue.isEmpty()) {
-            // DFS should result in less contention across findConnected threads than BFS
-            int next = queue.pop();
-            if (connectedNodes.getAndSet(next)) {
-                continue;
-            }
-            for (var it = view.getNeighborsIterator(next); it.hasNext(); ) {
-                queue.add(it.nextInt());
-            }
-        }
-    }
 
+    // get all nodes reachable from start node traveling only by label
     private void findConnectedByLabel(AtomicFixedBitSet connectedNodes, int start, int label) {
         try (var pl = labels.get()) {
             var queue = new ArrayDeque<Integer>();
@@ -406,7 +391,8 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         try (var gs = graphSearcher.get();
              var vc = vectorsCopy.get();
              var naturalScratchPooled = naturalScratch.get();
-             var concurrentScratchPooled = concurrentScratch.get()) {
+             var concurrentScratchPooled = concurrentScratch.get())
+        {
             // find ANN of the new node by searching the graph
             int[] eps = graph.entries();
             NodeSimilarity.ExactScoreFunction scoreFunction = i -> scoreBetween(vc.get().vectorValue(i), value);
@@ -422,7 +408,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
             // this means that considering additional nodes from the search path, that are by definition
             // farther away than the ones in the topK, would not change the result.)
             // TODO if we made NeighborArray an interface we could wrap the NodeScore[] directly instead of copying
-            // найденные ближайшие узлы в отсортированном виде
+            // найденные ближайшие узлы в отсортированном виде от лучшего к худшему
             var natural = toScratchCandidates(result.getNodes(), result.getNodes().length, naturalScratchPooled.get());
             // узлы которые сейчас находятся в процессе добавление в отсортированном виде
             // тут только узлы с подходящими метками
@@ -661,7 +647,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
             float[][] centroids = new float[updatedLabels.length][dimension];
             for (var it = graph.getNodes(); it.hasNext(); ) {
                 var node = it.nextInt();
-                if (!newNodeLabelChecker.hasLables(node)) {
+                if (!newNodeLabelChecker.hasCommonLabels(node)) {
                     continue;
                 }
                 for (int i = 0; i < updatedLabels.length; i++) {
@@ -696,12 +682,12 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         }
     }
 
-    protected void updateNeighbors(ConcurrentNeighborSet neighbors, NodeArray natural, NodeArray concurrent) {
+    private void updateNeighbors(ConcurrentNeighborSet neighbors, NodeArray natural, NodeArray concurrent) {
         neighbors.insertDiverse(natural, concurrent);
         neighbors.backlink(graph::getNeighbors, neighborOverflow);
     }
 
-    NodeArray toScratchCandidates(SearchResult.NodeScore[] candidates, int count, NodeArray scratch) {
+    private NodeArray toScratchCandidates(SearchResult.NodeScore[] candidates, int count, NodeArray scratch) {
         scratch.clear();
         for (int i = 0; i < count; i++) {
             var candidate = candidates[i];
@@ -710,7 +696,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
         return scratch;
     }
 
-    protected NodeArray getConcurrentCandidates(int newNode,
+    private NodeArray getConcurrentCandidates(int newNode,
                                                 Set<Integer> inProgress,
                                                 NodeArray scratch,
                                                 RandomAccessVectorValues<T> values,
@@ -718,7 +704,7 @@ public class LabeledGraphIndexBuilder<T> implements GraphIndexBuilderInterface<T
                                                 LabelsChecker labelsChecker) {
         scratch.clear();
         for (var n : inProgress) {
-            if (n != newNode && labelsChecker.hasLables(n)) {
+            if (n != newNode && labelsChecker.hasCommonLabels(n)) {
                 scratch.insertSorted(
                         n,
                         scoreBetween(values.vectorValue(newNode), valuesCopy.vectorValue(n)));

@@ -6,6 +6,7 @@ import io.github.jbellis.jvector.graph.label.impl.Int2SortedIntArrayHashMap;
 public class MutableAccessVectorLabels implements RandomAccessVectorLabels<LabelsSet>{
 
     int INITIAL_NUMBER_OF_NODES = 100_000;
+
     //todo Int2BitSet
     Int2SortedIntArrayHashMap vectorLabelsMap = new Int2SortedIntArrayHashMap(INITIAL_NUMBER_OF_NODES, 0.9);
 
